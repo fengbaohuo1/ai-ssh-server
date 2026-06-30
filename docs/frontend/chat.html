@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Agent 对话</title>
+<link rel="stylesheet" href="css/common.css">
+<style>
+  /* === Layout === */
+  .app { display: grid; grid-template-columns: 280px 1fr; height: 100vh; }
+  .sidebar {
+    background: var(--color-surface); border-right: 1px solid var(--color-border);
+    display: flex; flex-direction: column;
+  }
+  .sidebar-header {
+    padding: 20px; border-bottom: 1px solid var(--color-border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .sidebar-header .logo { font-size: 24px; }
+  .sidebar-header h2 { font-size: 18px; font-weight: 600; }
+  .sidebar-header .user-badge {
+    margin-left: auto; background: var(--color-primary); color: #fff;
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .sidebar-header .user-badge:hover { opacity: 0.8; }
+  .agent-list { flex: 1; overflow-y: auto; padding: 12px; }
+  .agent-card {
+    padding: 14px 16px; border-radius: var(--radius); cursor: pointer;
+    margin-bottom: 8px; border: 1.5px solid transparent;
+    transition: all 0.15s ease;
+  }
+  .agent-card:hover { background: #f9fafb; }
+  .agent-card.active { background: #eef2ff; border-color: var(--color-primary); }
+  .agent-card .name { font-size: 15px; font-weight: 600; }
+  .agent-card .desc { font-size: 13px; color: var(--color-text-secondary); margin-top: 4px; }
+  .agent-card .status { font-size: 12px; margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+  .agent-card .status .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .agent-card .status .dot.online { background: #22c55e; }
+  .agent-card .status .dot.offline { background: #d1d5db; }
+
+  /* === Main Chat === */
+  .chat-area { display: flex; flex-direction: column; height: 100vh; }
+  .chat-header {
+    padding: 16px 24px; border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+  .chat-header h3 { font-size: 17px; font-weight: 600; }
+  .chat-header .agent-desc { font-size: 13px; color: var(--color-text-secondary); margin-top: 2px; }
+  .chat-messages {
+    flex: 1; overflow-y: auto; padding: 24px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .chat-messages .empty-state {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; color: var(--color-text-secondary);
+  }
+  .chat-messages .empty-state .icon { font-size: 56px; margin-bottom: 16px; }
+  .chat-messages .empty-state h3 { font-size: 20px; color: var(--color-text); margin-bottom: 8px; }
+  .chat-messages .empty-state p { font-size: 14px; }
+
+  /* === Message Bubbles === */
+  .message { display: flex; gap: 12px; max-width: 75%; animation: fadeInUp 0.25s ease; }
+  .message.user { align-self: flex-end; flex-direction: row-reverse; }
+  .message.assistant { align-self: flex-start; }
+  @keyframes fadeInUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+  .message .avatar {
+    width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  .message.user .avatar { background: var(--color-primary); }
+  .message.assistant .avatar { background: var(--color-bubble-ai); }
+  .message .bubble {
+    padding: 12px 16px; border-radius: 16px; font-size: 15px; line-height: 1.55;
+    word-break: break-word; white-space: pre-wrap;
+  }
+  .message.user .bubble {
+    background: var(--color-bubble-user); color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+  .message.assistant .bubble {
+    background: var(--color-bubble-ai); color: var(--color-text);
+    border-bottom-left-radius: 4px;
+  }
+  .message .timestamp { font-size: 11px; color: var(--color-text-secondary); margin-top: 4px; }
+
+  /* === Input === */
+  .chat-input-area {
+    padding: 16px 24px; border-top: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+  .chat-input-area form { display: flex; gap: 12px; align-items: flex-end; }
+  .chat-input-area textarea {
+    flex: 1; padding: 10px 16px; border: 1.5px solid var(--color-border);
+    border-radius: var(--radius); font-size: 15px; font-family: var(--font-sans);
+    outline: none; resize: none; max-height: 120px; min-height: 44px;
+    transition: border-color 0.15s;
+    field-sizing: content; /* modern browsers */
+  }
+  .chat-input-area textarea:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px rgba(79,70,229,0.1); }
+  .chat-input-area .btn-send {
+    padding: 10px 24px; height: 44px; flex-shrink: 0;
+  }
+  .chat-input-area textarea:disabled { background: #f9fafb; }
+  .loading-dots { display: inline-flex; gap: 4px; }
+  .loading-dots span {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--color-text-secondary);
+    animation: bounce 1.4s infinite ease-in-out both;
+  }
+  .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+  .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+  @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+  /* === Step Cards === */
+  .steps-container { margin-bottom: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .step {
+    display: flex; align-items: flex-start; gap: 6px; padding: 6px 10px;
+    border-radius: 8px; font-size: 13px; animation: fadeInUp 0.2s ease;
+    flex-wrap: wrap;
+  }
+  .step-thinking { background: #fef3c7; color: #92400e; }
+  .step-tool_call { background: #e0e7ff; color: #3730a3; }
+  .step-tool_result { background: #f3f4f6; color: #374151; }
+  .step .step-icon { font-size: 14px; flex-shrink: 0; line-height: 1.4; }
+  .step .step-detail {
+    width: 100%; margin-top: 2px; padding: 4px 8px; border-radius: 4px;
+    background: rgba(0,0,0,0.05); font-family: var(--font-mono); font-size: 12px;
+    word-break: break-all; white-space: pre-wrap; max-height: 120px; overflow-y: auto;
+  }
+
+  /* === Responsive === */
+  @media (max-width: 768px) {
+    .app { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span class="logo">🤖</span>
+      <h2>AI Agent</h2>
+      <span class="user-badge" id="userBadge" title="逄1�7出登彄1�7">U</span>
+    </div>
+    <div class="agent-list" id="agentList">
+      <div style="text-align:center;padding:40px 20px;color:var(--color-text-secondary)">
+        <p>加载智能体列衄1�7...</p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Chat -->
+  <main class="chat-area">
+    <div class="chat-header" id="chatHeader">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between">
+        <div>
+          <h3>选择丄1�7个智能体</h3>
+          <p class="agent-desc">从左侧列表中选择智能体开始对评1�7/p>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;white-space:nowrap;padding-top:4px" title="流式输出：AI 回复逐字显示">
+          <input type="checkbox" id="streamToggle" checked> 流式输出
+        </label>
+      </div>
+    </div>
+    <div class="chat-messages" id="chatMessages">
+      <div class="empty-state">
+        <span class="icon">💬</span>
+        <h3>弄1�7始对评1�7/h3>
+        <p>选择丄1�7个智能体，输入你的问预1�7/p>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <form id="chatForm">
+        <textarea id="messageInput" class="input" placeholder="输入消息..." rows="1" disabled></textarea>
+        <button type="submit" class="btn btn-primary btn-send" id="sendBtn" disabled>发�1�7�1�7/button>
+      </form>
+    </div>
+  </main>
+</div>
+
+<script>
+// === Configuration ===
+const API_BASE = 'http://localhost:8091/api/v1';
+
+// === State ===
+let currentAgent = null;
+let currentSessionId = null;
+let isLoading = false;
+let useStream = true;
+
+// === DOM Refs ===
+const agentListEl = document.getElementById('agentList');
+const chatHeader = document.getElementById('chatHeader');
+const chatMessages = document.getElementById('chatMessages');
+const messageInput = document.getElementById('messageInput');
+const sendBtn = document.getElementById('sendBtn');
+const chatForm = document.getElementById('chatForm');
+const userBadge = document.getElementById('userBadge');
+const streamToggle = document.getElementById('streamToggle');
+streamToggle.addEventListener('change', () => {
+  useStream = streamToggle.checked;
+});
+
+// === Init ===
+const userId = localStorage.getItem('userId');
+if (!userId) { window.location.href = 'login.html'; }
+userBadge.textContent = userId.charAt(0).toUpperCase();
+userBadge.title = userId + '  1�7 点击逄1�7凄1�7';
+userBadge.addEventListener('click', () => {
+  localStorage.removeItem('userId');
+  window.location.href = 'login.html';
+});
+
+// === Load Agents ===
+async function loadAgents() {
+  try {
+    const res = await fetch(`${API_BASE}/query_ai_agent_config_list`);
+    if (!res.ok) throw new Error(`服务器错评1�7 (${res.status})`);
+    const body = await res.json();
+    if (body.code !== '0000') throw new Error(body.info);
+    renderAgentList(body.data);
+  } catch (err) {
+    agentListEl.innerHTML = `<div style="text-align:center;padding:40px 20px;color:var(--color-danger)">
+      <p>加载失败</p><p style="font-size:12px;margin-top:4px">${err.message}</p>
+      <button class="btn btn-primary" style="margin-top:16px" onclick="loadAgents()">重试</button>
+    </div>`;
+  }
+}
+
+function renderAgentList(agents) {
+  if (!agents || agents.length === 0) {
+    agentListEl.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--color-text-secondary)"><p>暂无可用智能佄1�7/p></div>';
+    return;
+  }
+  agentListEl.innerHTML = '';
+  agents.forEach(a => {
+    const card = document.createElement('div');
+    card.className = 'agent-card';
+    card.dataset.agentId = a.agentId;
+    card.addEventListener('click', () => selectAgent(a.agentId, a.agentName, a.agentDesc));
+
+    const nameDiv = document.createElement('div');
+    nameDiv.className = 'name';
+    nameDiv.textContent = a.agentName;
+
+    const descDiv = document.createElement('div');
+    descDiv.className = 'desc';
+    descDiv.textContent = a.agentDesc;
+
+    const statusDiv = document.createElement('div');
+    statusDiv.className = 'status';
+    statusDiv.innerHTML = '<span class="dot online"></span> 可用';
+
+    card.appendChild(nameDiv);
+    card.appendChild(descDiv);
+    card.appendChild(statusDiv);
+    agentListEl.appendChild(card);
+  });
+}
+
+// === Session Management ===
+function getCachedSessionId(agentId) {
+  const key = `session_${agentId}_${userId}`;
+  return localStorage.getItem(key) || null;
+}
+
+function setCachedSessionId(agentId, sessionId) {
+  const key = `session_${agentId}_${userId}`;
+  localStorage.setItem(key, sessionId);
+}
+
+async function createOrGetSession(agentId) {
+  const cached = getCachedSessionId(agentId);
+  if (cached) return cached;
+
+  const res = await fetch(`${API_BASE}/create_session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agentId, userId })
+  });
+  const body = await res.json();
+  if (body.code !== '0000') throw new Error(body.info);
+  const sessionId = body.data.sessionId;
+  setCachedSessionId(agentId, sessionId);
+  return sessionId;
+}
+
+// === Agent Selection ===
+async function selectAgent(agentId, agentName, agentDesc) {
+  if (isLoading) return;
+
+  // Update sidebar active state
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const card = document.querySelector(`[data-agent-id="${agentId}"]`);
+  if (card) card.classList.add('active');
+
+  currentAgent = { agentId, agentName, agentDesc };
+
+  // Update header (preserve streaming toggle)
+  const headerLeft = chatHeader.querySelector('div > div:first-child');
+  if (headerLeft) {
+    headerLeft.innerHTML = `<h3>${escapeHtml(agentName)}</h3><p class="agent-desc">${escapeHtml(agentDesc)}</p>`;
+  }
+
+  // Enable input
+  messageInput.disabled = false;
+  sendBtn.disabled = false;
+  messageInput.placeholder = `各1�7 ${agentName} 发�1�7�消恄1�7...`;
+  messageInput.focus();
+
+  // Get or create session
+  try {
+    currentSessionId = await createOrGetSession(agentId);
+  } catch (err) {
+    addMessage('assistant', `创建会话失败: ${err.message}`);
+    return;
+  }
+
+}
+
+// === Message Rendering ===
+function addMessage(role, content) {
+  // Remove empty state if present
+  const emptyState = chatMessages.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  const avatarIcon = role === 'user' ? '👤' : '🤖';
+  const now = new Date();
+  const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  div.innerHTML = `
+    <div class="avatar">${avatarIcon}</div>
+    <div>
+      <div class="bubble">${escapeHtml(content)}</div>
+      <div class="timestamp">${time}</div>
+    </div>
+  `;
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function addLoadingBubble() {
+  const emptyState = chatMessages.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  div.id = 'loadingBubble';
+  div.innerHTML = `
+    <div class="avatar">🤖</div>
+    <div class="bubble"><span class="loading-dots"><span></span><span></span><span></span></span></div>
+  `;
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function removeLoadingBubble() {
+  const el = document.getElementById('loadingBubble');
+  if (el) el.remove();
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// === Send Message ===
+chatForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (isLoading || !currentAgent || !currentSessionId) return;
+
+  const message = messageInput.value.trim();
+  if (!message) return;
+
+  // Disable UI
+  isLoading = true;
+  messageInput.disabled = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = '...';
+
+  // Show user message
+  addMessage('user', message);
+  messageInput.value = '';
+  addLoadingBubble();
+
+  try {
+    if (useStream) {
+      // === Streaming mode ===
+      const res = await fetch(`${API_BASE}/chat_stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentId: currentAgent.agentId,
+          userId,
+          sessionId: currentSessionId,
+          message
+        })
+      });
+
+      removeLoadingBubble();
+
+      if (!res.ok) {
+        throw new Error(`服务器错评1�7 (${res.status})`);
+      }
+
+      // Create streaming bubble with steps container
+      const bubbleDiv = document.createElement('div');
+      bubbleDiv.className = 'message assistant';
+      const stepsId = 'steps-' + Date.now();
+      bubbleDiv.innerHTML = `
+        <div class="avatar">🤖</div>
+        <div style="min-width:0">
+          <div class="steps-container" id="${stepsId}"></div>
+          <div class="bubble stream-bubble"></div>
+        </div>
+      `;
+      chatMessages.appendChild(bubbleDiv);
+      const streamBubble = bubbleDiv.querySelector('.stream-bubble');
+      const stepsContainer = bubbleDiv.querySelector('#' + stepsId);
+      let fullText = '';
+      let stepCount = 0;
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            let raw = line.slice(5).trim();
+            if (raw.startsWith('{')) {
+              try {
+                const json = JSON.parse(raw);
+                // 渲染步骤事件 (s 字段)
+                if (json.s) {
+                  const steps = Array.isArray(json.s) ? json.s : [json.s];
+                  steps.forEach(s => renderStep(stepsContainer, s, ++stepCount));
+                  chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+                if (json.v) {
+                  // 文本回复到达 ↄ1�7 不再思�1�7�，移除扄1�7朄1�7 thinking 卡片
+                  if (!fullText) {
+                    stepsContainer.querySelectorAll('.step-thinking').forEach(el => el.remove());
+                  }
+                  fullText += json.v;
+                  streamBubble.textContent = fullText;
+                  chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+              } catch (e) { /* skip malformed JSON */ }
+            }
+          }
+        }
+      }
+
+      // Finalize bubble
+      const now = new Date();
+      const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+      const timeEl = document.createElement('div');
+      timeEl.className = 'timestamp';
+      timeEl.textContent = time;
+      bubbleDiv.querySelector('div:last-child').appendChild(timeEl);
+
+      if (!fullText) {
+        streamBubble.textContent = '(空响庄1�7)';
+      }
+    } else {
+      // === Non-streaming mode (original) ===
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentId: currentAgent.agentId,
+          userId,
+          sessionId: currentSessionId,
+          message
+        })
+      });
+      if (!res.ok) throw new Error(`服务器错评1�7 (${res.status})`);
+      const body = await res.json();
+      removeLoadingBubble();
+
+      if (body.code !== '0000') {
+        addMessage('assistant', `错误: ${body.info}`);
+      } else {
+        addMessageWithSteps('assistant', body.data.content || '(空响庄1�7)', body.data.steps);
+      }
+    }
+  } catch (err) {
+    removeLoadingBubble();
+    addMessage('assistant', `请求失败: ${err.message}`);
+  } finally {
+    isLoading = false;
+    messageInput.disabled = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = '发�1�7�1�7';
+    messageInput.focus();
+  }
+});
+
+// === Keyboard: Enter to send, Shift+Enter for newline ===
+messageInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    chatForm.dispatchEvent(new Event('submit'));
+  }
+});
+
+// === Step Rendering ===
+function renderStep(container, stepData, stepIndex) {
+  let step;
+  if (typeof stepData === 'string') {
+    try { step = JSON.parse(stepData); } catch (e) { return; }
+  } else {
+    step = stepData;
+  }
+  const type = step.t;
+  const icons = { thinking: '🤔', tool_call: '🔧', tool_result: '📋' };
+  const labels = { thinking: '正在思�1�7�1�7...', tool_call: '调用工具', tool_result: '工具返回' };
+  const icon = icons[type] || '📌';
+  const label = labels[type] || type;
+
+  const div = document.createElement('div');
+  div.className = `step step-${type}`;
+  let detailHtml = '';
+  if (type === 'tool_call' && step.a) {
+    detailHtml = `<div class="step-detail">${escapeHtml(step.a)}</div>`;
+  } else if (type === 'tool_result' && step.r) {
+    const preview = step.r.length > 300 ? step.r.substring(0, 300) + '...' : step.r;
+    detailHtml = `<div class="step-detail">${escapeHtml(preview)}</div>`;
+  }
+  div.innerHTML = `
+    <span class="step-icon">${icon}</span>
+    <span>${label}${step.n ? ' <b>' + escapeHtml(step.n) + '</b>' : ''}</span>
+    ${detailHtml}
+  `;
+  container.appendChild(div);
+}
+
+function addMessageWithSteps(role, content, stepsJson) {
+  const emptyState = chatMessages.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  const avatarIcon = role === 'user' ? '👤' : '🤖';
+  const now = new Date();
+  const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+
+  let stepsHtml = '';
+  if (stepsJson) {
+    const stepsId = 'steps-' + Date.now();
+    stepsHtml = `<div class="steps-container" id="${stepsId}"></div>`;
+    // 延迟渲染步骤（需覄1�7 DOM 就绪＄1�7
+    setTimeout(() => {
+      const container = document.getElementById(stepsId);
+      if (!container) return;
+      try {
+        const arr = JSON.parse('[' + stepsJson + ']');
+        let i = 0;
+        arr.forEach(s => renderStep(container, s, ++i));
+      } catch (e) {
+        // 可能是单对象
+        try {
+          renderStep(container, JSON.parse(stepsJson), 1);
+        } catch (e2) { /* ignore */ }
+      }
+    }, 0);
+  }
+
+  div.innerHTML = `
+    <div class="avatar">${avatarIcon}</div>
+    <div style="min-width:0">
+      ${stepsHtml}
+      <div class="bubble">${escapeHtml(content)}</div>
+      <div class="timestamp">${time}</div>
+    </div>
+  `;
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+// === Bootstrap ===
+loadAgents();
+</script>
+</body>
+</html>

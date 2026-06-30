@@ -1,0 +1,5 @@
+spring:
+  config:
+    name: ai-ssh-server-app
+  profiles:
+    active: dev

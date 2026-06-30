@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Agent 平台 - 登录</title>
+<link rel="stylesheet" href="css/common.css">
+<style>
+  .login-wrapper {
+    display: flex; align-items: center; justify-content: center;
+    height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  }
+  .login-card {
+    background: var(--color-surface); border-radius: 20px;
+    padding: 48px 40px; width: 400px; max-width: 90vw;
+    box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);
+    text-align: center;
+  }
+  .login-card h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .login-card p { color: var(--color-text-secondary); margin-bottom: 32px; font-size: 14px; }
+  .login-card .input { margin-bottom: 24px; text-align: left; }
+  .login-card label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; color: var(--color-text); }
+  .login-card .btn { width: 100%; padding: 12px; font-size: 16px; }
+  .error-msg { color: var(--color-danger); font-size: 13px; margin-top: 8px; display: none; }
+</style>
+</head>
+<body>
+<div class="login-wrapper">
+  <div class="login-card">
+    <h1>🤖 AI Agent 平台</h1>
+    <p>输入用户名开始对评1�7/p>
+    <form id="loginForm">
+      <label for="username">用户各1�7/label>
+      <input type="text" id="username" class="input" placeholder="请输入用户名" required autofocus>
+      <p class="error-msg" id="errorMsg">请输入用户名</p>
+      <button type="submit" class="btn btn-primary">癄1�7 彄1�7/button>
+    </form>
+  </div>
+</div>
+<script>
+  const form = document.getElementById('loginForm');
+  const usernameInput = document.getElementById('username');
+  const errorMsg = document.getElementById('errorMsg');
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const username = usernameInput.value.trim();
+    if (!username) {
+      errorMsg.style.display = 'block';
+      return;
+    }
+    errorMsg.style.display = 'none';
+    localStorage.setItem('userId', username);
+    window.location.href = 'chat.html';
+  });
+</script>
+</body>
+</html>

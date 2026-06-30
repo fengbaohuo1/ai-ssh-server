@@ -1,0 +1,49 @@
+/* === CSS Variables === */
+:root {
+  --color-bg: #f5f5f5;
+  --color-surface: #ffffff;
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
+  --color-text: #1e1e1e;
+  --color-text-secondary: #6b7280;
+  --color-border: #e5e7eb;
+  --color-bubble-user: #4f46e5;
+  --color-bubble-ai: #f3f4f6;
+  --color-danger: #ef4444;
+  --radius: 12px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+}
+
+/* === Reset === */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* === Utility === */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 10px 24px; border: none; border-radius: var(--radius);
+  font-size: 15px; font-weight: 500; cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-primary { background: var(--color-primary); color: #fff; }
+.btn-primary:hover { background: var(--color-primary-hover); transform: translateY(-1px); box-shadow: var(--shadow-lg); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.input {
+  width: 100%; padding: 10px 16px; border: 1.5px solid var(--color-border);
+  border-radius: var(--radius); font-size: 15px; font-family: var(--font-sans);
+  outline: none; transition: border-color 0.15s ease;
+}
+.input:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px rgba(79,70,229,0.1); }

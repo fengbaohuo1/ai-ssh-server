@@ -1,0 +1,1 @@
+docker stop ai-ssh-server
