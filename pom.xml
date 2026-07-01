@@ -89,10 +89,17 @@
                 <artifactId>spring-ai-agent-utils</artifactId>
                 <version>0.10.0</version>
             </dependency>
+            <!-- MyBatis-Plus（Spring Boot 4.x 专用） -->
             <dependency>
-                <groupId>org.mybatis.spring.boot</groupId>
-                <artifactId>mybatis-spring-boot-starter</artifactId>
-                <version>4.0.1</version>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot4-starter</artifactId>
+                <version>3.5.16</version>
+            </dependency>
+            <!-- JDK 17+ 需要 jsqlparser 支持分页等功能 -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-jsqlparser</artifactId>
+                <version>3.5.16</version>
             </dependency>
             <dependency>
                 <groupId>com.mysql</groupId>
