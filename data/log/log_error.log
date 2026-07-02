@@ -1,0 +1,21 @@
+26-07-02.22:19:15.030 [main            ] WARN  SyncMcpSamplingProvider - No sampling methods found
+26-07-02.22:19:15.031 [main            ] WARN  SyncMcpElicitationProvider - No elicitation methods found
+26-07-02.22:19:15.045 [main            ] WARN  AnnotationConfigServletWebServerApplicationContext - Exception encountered during context initialization - cancelling refresh attempt: org.springframework.context.ApplicationContextException: Failed to start bean 'webServerStartStop'
+26-07-02.22:19:15.071 [main            ] ERROR LoggingFailureAnalysisReporter - 
+
+***************************
+APPLICATION FAILED TO START
+***************************
+
+Description:
+
+Web server failed to start. Port 8091 was already in use.
+
+Action:
+
+Identify and stop the process that's listening on port 8091 or configure this application to listen on another port.
+
+26-07-02.22:27:14.455 [main            ] WARN  SyncMcpSamplingProvider - No sampling methods found
+26-07-02.22:27:14.456 [main            ] WARN  SyncMcpElicitationProvider - No elicitation methods found
+26-07-02.22:31:17.474 [main            ] WARN  SyncMcpSamplingProvider - No sampling methods found
+26-07-02.22:31:17.475 [main            ] WARN  SyncMcpElicitationProvider - No elicitation methods found

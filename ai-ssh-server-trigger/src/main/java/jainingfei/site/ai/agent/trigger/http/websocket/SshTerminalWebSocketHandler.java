@@ -3,7 +3,8 @@ package jainingfei.site.ai.agent.trigger.http.websocket;
 import com.jcraft.jsch.ChannelShell;
 import com.jcraft.jsch.Session;
 import jakarta.annotation.Resource;
-import jainingfei.site.ai.agent.infrastructure.adapter.port.SshSessionPort;
+import jakarta.annotation.PreDestroy;
+import jainingfei.site.ai.agent.domain.ssh.adapter.port.ISshSessionPort;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
@@ -11,16 +12,20 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import org.springframework.web.util.UriTemplate;
 
 @Slf4j
 @Component
 public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
 
     @Resource
-    private SshSessionPort sshSessionPort;
+    private ISshSessionPort sshSessionPort;
 
     private final ConcurrentHashMap<String, ChannelShell> channelMap = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
@@ -32,8 +37,9 @@ public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionEstablished(WebSocketSession wsSession) throws Exception {
         // 1. 从路径中提取 connectionId: /ws/terminal/{connectionId}
-        String path = wsSession.getUri().getPath();
-        String connectionId = path.substring(path.lastIndexOf('/') + 1);
+        UriTemplate template = new UriTemplate("/ws/terminal/{connectionId}");
+        Map<String, String> vars = template.match(wsSession.getUri().getPath());
+        String connectionId = vars.get("connectionId");
 
         log.info("WebSocket terminal connected connectionId={} sessionId={}", connectionId, wsSession.getId());
 
@@ -63,7 +69,7 @@ public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
                     int len;
                     while ((len = inputStream.read(buffer)) != -1) {
                         if (wsSession.isOpen()) {
-                            wsSession.sendMessage(new TextMessage(new String(buffer, 0, len, "UTF-8")));
+                            wsSession.sendMessage(new TextMessage(new String(buffer, 0, len, StandardCharsets.UTF_8)));
                         }
                     }
                 } catch (Exception e) {
@@ -85,7 +91,7 @@ public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
         ChannelShell channel = channelMap.get(wsSession.getId());
         if (channel != null) {
             OutputStream out = channel.getOutputStream();
-            out.write(message.getPayload().getBytes());
+            out.write(message.getPayload().getBytes(StandardCharsets.UTF_8));
             out.flush();
         }
     }
@@ -107,5 +113,10 @@ public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
         if (channel != null && channel.isConnected()) {
             channel.disconnect();
         }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        executor.shutdownNow();
     }
 }

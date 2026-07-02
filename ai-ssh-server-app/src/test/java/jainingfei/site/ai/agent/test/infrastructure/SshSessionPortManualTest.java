@@ -64,7 +64,6 @@ public class SshSessionPortManualTest {
         }
     }
 
-    @SuppressWarnings("resource")
     private static String readPasswordFromConsole() {
         Console console = System.console();
         if (console != null) {
@@ -88,7 +87,6 @@ public class SshSessionPortManualTest {
         System.out.println("============================================");
     }
 
-    @SuppressWarnings("resource")
     private static void interactiveCommandLoop(Session session) throws Exception {
         Scanner scanner = new Scanner(System.in, StandardCharsets.UTF_8);
         while (true) {

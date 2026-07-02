@@ -67,6 +67,12 @@
             <groupId>jainingfei.site</groupId>
             <artifactId>ai-ssh-server-types</artifactId>
         </dependency>
+
+        <!-- SSH 客户端（领域层接口需要引用 JSch Session 类型） -->
+        <dependency>
+            <groupId>com.jcraft</groupId>
+            <artifactId>jsch</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

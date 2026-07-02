@@ -1,5 +1,7 @@
 package jainingfei.site.ai.agent.domain.ssh.adapter.port;
 
+import com.jcraft.jsch.Session;
+
 /**
  * ClassName:ISshSessionPort
  * Project:ai-ssh-server
@@ -39,4 +41,12 @@ public interface ISshSessionPort {
      * @return 是否已连接
      */
     boolean isConnected(String connectionId);
+
+    /**
+     * 获取 JSch Session（供 WebSocket 终端使用）
+     *
+     * @param connectionId 连接ID
+     * @return JSch Session，可能为 null
+     */
+    Session getSession(String connectionId);
 }
