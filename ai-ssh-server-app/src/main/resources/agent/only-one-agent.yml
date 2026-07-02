@@ -1,0 +1,38 @@
+ai:
+  agent:
+    config:
+      enabled: true
+      tables:
+        testAgent03:
+          app-name: testAgent03
+          agent:
+            agent-id: 100003
+            agent-name: 单一智能体
+            agent-desc: 单一智能体
+          module:
+            chat-model:
+              base-url: https://api.deepseek.com
+              api-key: sk-REDACTED
+              model: deepseek-v4-pro
+              tool-mcp-list:
+                - remote:
+                    name: baidu-web-search
+                    url: https://qianfan.baidubce.com/v2/tools/web-search/mcp
+                    request-timeout: 30000
+                    headers:
+                      Authorization: Bearer ${AI_SSH_BAIDU_MCP_TOKEN:}
+                - local:
+                    name: myToolCallbackProvider
+              tool-skills-list:
+                - type: resource
+                  path: agent/skills
+            agents:
+              - name: onlyAgent
+                description: 通用智能助手
+                instruction: |
+                  你是一个通用智能助手。根据用户需求，自动选择合适的工具来完成任务。回答简洁准确。
+            runner:
+              agent-name: onlyAgent
+              plugin-name-list:
+                - myTestPlugin
+#                - myLogPlugin
