@@ -1,7 +1,11 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.skills.impl;
 
+import com.google.adk.tools.BaseTool;
+import com.google.adk.tools.BaseToolset;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.mcp.client.ToolCallbackBaseTool;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.skills.ToolSkillsCreateService;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.toolset.StaticToolset;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springaicommunity.agent.tools.SkillsTool;
@@ -19,33 +23,32 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Spring AI Community 构建 Skills → {@link ToolCallback} 列表。
+ * Skills → ADK {@link BaseToolset}。
+ * <p>
+ * V2.1: 产出从 {@code ToolCallback[]} 改为 {@link BaseToolset}。
  */
 @Slf4j
 @Service
 public class DefaultToolSkillsCreateService implements ToolSkillsCreateService {
 
     @Override
-    public List<ToolCallback> getToolCallbacks(List<AiAgentConfigTableVO.Module.ChatModel.ToolSkills> toolSkillsList) throws Exception {
+    public BaseToolset createToolset(List<AiAgentConfigTableVO.Module.ChatModel.ToolSkills> toolSkillsList) throws Exception {
         List<ToolCallback> all = new ArrayList<>();
         for (AiAgentConfigTableVO.Module.ChatModel.ToolSkills toolSkills : toolSkillsList) {
             all.addAll(buildToolCallbacks(toolSkills));
         }
-        log.info("Skills ToolCallbacks collected, total:{}", all.size());
-        return all;
+        List<BaseTool> baseTools = new ArrayList<>();
+        for (ToolCallback cb : all) baseTools.add(new ToolCallbackBaseTool(cb));
+        log.info("Skills → BaseToolset, total:{}", all.size());
+        return new StaticToolset(baseTools);
     }
 
     private List<ToolCallback> buildToolCallbacks(AiAgentConfigTableVO.Module.ChatModel.ToolSkills toolSkills) {
         String type = toolSkills.getType();
         String path = toolSkills.getPath();
         List<ToolCallback> callbacks = new ArrayList<>();
-
-        if ("directory".equals(type)) {
-            callbacks.add(SkillsTool.builder().addSkillsDirectory(path).build());
-        }
-        if ("resource".equals(type)) {
-            callbacks.add(SkillsTool.builder().addSkillsResource(new ClassPathResource(path)).build());
-        }
+        if ("directory".equals(type)) callbacks.add(SkillsTool.builder().addSkillsDirectory(path).build());
+        if ("resource".equals(type)) callbacks.add(SkillsTool.builder().addSkillsResource(new ClassPathResource(path)).build());
         return callbacks;
     }
 

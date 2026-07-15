@@ -1,7 +1,7 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.node;
 
 import com.google.adk.agents.LlmAgent;
-import com.google.adk.models.springai.SpringAI;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.adk.FixedSpringAI;
 import com.google.adk.tools.BaseToolset;
 import jakarta.annotation.Resource;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
@@ -36,7 +36,7 @@ public class AgentNode extends AbstractArmorySupport {
                     .name(agentConfig.getName())
                     .instruction(agentConfig.getInstruction())
                     .description(agentConfig.getDescription())
-                    .model(new SpringAI(chatModel))
+                    .model(new FixedSpringAI(chatModel))
                     .outputKey(agentConfig.getOutputKey())
                     .tools(mcpToolsets)
                     .build();
