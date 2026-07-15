@@ -4,6 +4,7 @@ import com.google.adk.agents.LlmAgent;
 import com.google.adk.agents.LoopAgent;
 import com.google.adk.agents.SequentialAgent;
 import com.google.adk.events.Event;
+import com.google.adk.models.springai.SpringAI;
 import com.google.adk.runner.InMemoryRunner;
 import com.google.adk.sessions.Session;
 import com.google.adk.tools.Annotations;
@@ -55,7 +56,7 @@ public class LoopAgentTest {
         // STEP 1: Initial Writer Agent (Runs ONCE at the beginning)
         LlmAgent initialWriterAgent =
                 LlmAgent.builder()
-                        .model(new SpringAiAdkModel(chatModel, options))
+                        .model(new SpringAI(chatModel))
                         .name("InitialWriterAgent")
                         .description(
                                 "Writes the initial document draft based on the topic, aiming for some initial"
@@ -75,7 +76,7 @@ public class LoopAgentTest {
         // STEP 2a: Critic Agent (Inside the Refinement Loop)
         LlmAgent criticAgentInLoop =
                 LlmAgent.builder()
-                        .model(new SpringAiAdkModel(chatModel, options))
+                        .model(new SpringAI(chatModel))
                         .name("CriticAgent")
                         .description(
                                 "Reviews the current draft, providing critique if clear improvements are needed,"
@@ -107,7 +108,7 @@ public class LoopAgentTest {
         // STEP 2b: Refiner/Exiter Agent (Inside the Refinement Loop)
         LlmAgent refinerAgentInLoop =
                 LlmAgent.builder()
-                        .model(new SpringAiAdkModel(chatModel, options))
+                        .model(new SpringAI(chatModel))
                         .name("RefinerAgent")
                         .description(
                                 "Refines the document based on critique, or calls exitLoop if critique indicates"

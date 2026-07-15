@@ -3,6 +3,7 @@ package jainingfei.site.ai.agent.test.agent;
 import com.google.adk.agents.LlmAgent;
 import com.google.adk.agents.SequentialAgent;
 import com.google.adk.events.Event;
+import com.google.adk.models.springai.SpringAI;
 import com.google.adk.runner.InMemoryRunner;
 import com.google.adk.sessions.Session;
 import com.google.genai.types.Content;
@@ -36,7 +37,7 @@ public class SequentialAgentTest {
                 SequentialAgent.builder()
                         .name("CodePipelineAgent")
                         .description("Executes a sequence of code writing, reviewing, and refactoring.")
-                        .subAgents(codeWriterAgent(chatModel, options), codeReviewerAgent(chatModel, options), codeRefactorerAgent(chatModel, options))
+                        .subAgents(codeWriterAgent(chatModel), codeReviewerAgent(chatModel), codeRefactorerAgent(chatModel))
                         .build();
 
         // Create an InMemoryRunner
@@ -58,9 +59,9 @@ public class SequentialAgentTest {
 
     }
 
-    public static LlmAgent codeWriterAgent(ChatModel chatModel, OpenAiChatOptions options) {
+    public static LlmAgent codeWriterAgent(ChatModel chatModel) {
         return LlmAgent.builder()
-                .model(new SpringAiAdkModel(chatModel, options))
+                .model(new SpringAI(chatModel))
                 .name("CodeWriterAgent")
                 .description("Writes initial Java code based on a specification.")
                 .instruction(
@@ -74,9 +75,9 @@ public class SequentialAgentTest {
                 .build();
     }
 
-    public static LlmAgent codeReviewerAgent(ChatModel chatModel, OpenAiChatOptions options) {
+    public static LlmAgent codeReviewerAgent(ChatModel chatModel) {
         return LlmAgent.builder()
-                .model(new SpringAiAdkModel(chatModel, options))
+                .model(new SpringAI(chatModel))
                 .name("CodeReviewerAgent")
                 .description("Reviews code and provides feedback.")
                 .instruction(
@@ -105,9 +106,9 @@ public class SequentialAgentTest {
                 .build();
     }
 
-    public static LlmAgent codeRefactorerAgent(ChatModel chatModel, OpenAiChatOptions options) {
+    public static LlmAgent codeRefactorerAgent(ChatModel chatModel) {
         return LlmAgent.builder()
-                .model(new SpringAiAdkModel(chatModel, options))
+                .model(new SpringAI(chatModel))
                 .name("CodeRefactorerAgent")
                 .description("Refactors code based on review comments.")
                 .instruction(

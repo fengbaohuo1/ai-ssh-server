@@ -3,6 +3,7 @@ package jainingfei.site.ai.agent.test.agent;
 import com.google.adk.agents.LlmAgent;
 import com.google.adk.agents.ParallelAgent;
 import com.google.adk.agents.SequentialAgent;
+import com.google.adk.models.springai.SpringAI;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.openai.OpenAiChatModel;
@@ -29,7 +30,7 @@ public class ParallelAgentTest {
         // Researcher 1: Renewable Energy
         LlmAgent researcherAgent1 = LlmAgent.builder()
                 .name("RenewableEnergyResearcher")
-                .model(new SpringAiAdkModel(chatModel, options))
+                .model(new SpringAI(chatModel))
                 .instruction("""
                      You are an AI Research Assistant specializing in energy.
                      Research the latest advancements in 'renewable energy sources'.
@@ -43,7 +44,7 @@ public class ParallelAgentTest {
 
         LlmAgent researcherAgent2 = LlmAgent.builder()
                 .name("EVResearcher")
-                .model(new SpringAiAdkModel(chatModel, options))
+                .model(new SpringAI(chatModel))
                 .instruction("""
                      You are an AI Research Assistant specializing in transportation.
                      Research the latest developments in 'electric vehicle technology'.
@@ -57,7 +58,7 @@ public class ParallelAgentTest {
 
         LlmAgent researcherAgent3 = LlmAgent.builder()
                 .name("CarbonCaptureResearcher")
-                .model(new SpringAiAdkModel(chatModel, options))
+                .model(new SpringAI(chatModel))
                 .instruction("""
                      You are an AI Research Assistant specializing in climate solutions.
                      Research the current state of 'carbon capture methods'.
@@ -79,7 +80,7 @@ public class ParallelAgentTest {
         LlmAgent mergerAgent =
                 LlmAgent.builder()
                         .name("SynthesisAgent")
-                        .model(new SpringAiAdkModel(chatModel, options))
+                        .model(new SpringAI(chatModel))
                         .instruction(
                                 """
                                       You are an AI Assistant responsible for combining research findings into a structured report.

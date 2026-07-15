@@ -2,24 +2,23 @@ package jainingfei.site.ai.agent.trigger.http;
 
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.adk.events.Event;
+import com.google.genai.types.FunctionCall;
+import com.google.genai.types.FunctionResponse;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.api.IAgentService;
 import jainingfei.site.ai.agent.api.dto.*;
 import jainingfei.site.ai.agent.api.response.Response;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
-import jainingfei.site.ai.agent.domain.agent.service.armory.AgentStepBuffer;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
 import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-
+import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -115,18 +114,13 @@ public class AgentServiceController implements IAgentService {
                 sessionId = chatService.createSession(requestDTO.getAgentId(), requestDTO.getUserId());
             }
 
-            // 清空步骤缓冲，确保本次对话的步骤记录干净
-            AgentStepBuffer.getInstance().clear();
-
-            List<String> messages = chatService.handleMessage(requestDTO.getAgentId(), requestDTO.getUserId(), sessionId, requestDTO.getMessage());
-
-            // 收集 Agent 动作步骤
-            String steps = AgentStepBuffer.getInstance().drain();
+            ChatResult result = processEventStream(
+                    requestDTO.getAgentId(), requestDTO.getUserId(), sessionId, requestDTO.getMessage());
 
             ChatResponseDTO responseDTO = new ChatResponseDTO();
-            responseDTO.setContent(String.join("\n", messages));
-            if (steps != null && !steps.isEmpty()) {
-                responseDTO.setSteps(steps);
+            responseDTO.setContent(result.text());
+            if (result.steps() != null && !result.steps().isEmpty()) {
+                responseDTO.setSteps(result.steps());
             }
 
             return Response.<ChatResponseDTO>builder()
@@ -149,33 +143,65 @@ public class AgentServiceController implements IAgentService {
         }
     }
 
+    /**
+     * 处理 ADK event stream（非流式），分离文本和步骤事件。
+     */
+    private ChatResult processEventStream(String agentId, String userId, String sessionId, String message) {
+        List<String> outputs = chatService.handleMessage(agentId, userId, sessionId, message);
+        // 从 stringifyContent 输出中分离文本和步骤
+        StringBuilder text = new StringBuilder();
+        List<String> steps = new ArrayList<>();
+        for (String output : outputs) {
+            if (output.startsWith("Function Call:") || output.startsWith("Function Response:")) {
+                steps.add(parseStepJson(output));
+            } else if (!output.isEmpty()) {
+                text.append(output);
+            }
+        }
+        String stepsJson = steps.isEmpty() ? null : "[" + String.join(",", steps) + "]";
+        return new ChatResult(text.toString(), stepsJson);
+    }
+
+    /** 将 ADK 事件字符串转换为步骤 JSON */
+    private String parseStepJson(String eventContent) {
+        if (eventContent.startsWith("Function Call:")) {
+            String inner = eventContent.substring("Function Call:".length()).trim();
+            String name = extractField(inner, "name=");
+            String args = extractField(inner, "args=");
+            return "{\"t\":\"tool_call\",\"n\":\"" + esc(name) + "\",\"a\":\"" + esc(truncate(args, 200)) + "\"}";
+        } else if (eventContent.startsWith("Function Response:")) {
+            String inner = eventContent.substring("Function Response:".length()).trim();
+            String name = extractField(inner, "name=");
+            String response = extractField(inner, "response=");
+            return "{\"t\":\"tool_result\",\"n\":\"" + esc(name) + "\",\"r\":\"" + esc(truncate(response, 500)) + "\"}";
+        }
+        return "{\"t\":\"thinking\"}";
+    }
+
+    private String extractField(String s, String fieldPrefix) {
+        int start = s.indexOf(fieldPrefix);
+        if (start < 0) return "";
+        start += fieldPrefix.length();
+        int end = s.indexOf(',', start);
+        if (end < 0) end = s.indexOf('}', start);
+        if (end < 0) end = s.length();
+        String val = s.substring(start, end).trim();
+        while (val.endsWith("}")) val = val.substring(0, val.length() - 1).trim();
+        return val;
+    }
+
+    private record ChatResult(String text, String steps) {}
+
     @RequestMapping(value = "chat_stream", method = RequestMethod.POST)
     @Override
     public SseEmitter chatStream(@RequestBody ChatRequestDTO requestDTO) {
         SseEmitter emitter = new SseEmitter(3 * 60 * 1000L);
-        AgentStepBuffer buffer = AgentStepBuffer.getInstance();
-        buffer.clear();
 
-        // 后台定时器：每 80ms 轮询一次步骤缓冲区，逐个 chunk 推给前端
-        // 解决工具循环期间 stream() 阻塞导致步骤事件堆积、无法渐进输出的问题
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "step-push");
-            t.setDaemon(true);
-            return t;
-        });
-        scheduler.scheduleWithFixedDelay(() -> {
-            try {
-                String chunk;
-                while ((chunk = buffer.drainOne()) != null) {
-                    StringBuilder json = new StringBuilder("{\"v\":\"\",\"s\":");
-                    json.append(chunk);  // chunk 已是完整 JSON 对象
-                    json.append("}");
-                    emitter.send(SseEmitter.event().data(json.toString()));
-                }
-            } catch (Exception ignored) {
-                // emitter 可能已关闭
-            }
-        }, 0, 80, TimeUnit.MILLISECONDS);
+        // 发送初始 thinking 步骤
+        try {
+            emitter.send(SseEmitter.event()
+                    .data("{\"v\":\"\",\"s\":{\"t\":\"thinking\"}}"));
+        } catch (Exception ignored) {}
 
         try {
             log.info("流式对话 agentId:{} userId:{} sessionId:{} message:{}",
@@ -187,50 +213,82 @@ public class AgentServiceController implements IAgentService {
                     .subscribe(
                             event -> {
                                 try {
-                                    String content = event.stringifyContent();
-                                    String steps = buffer.drain();
-                                    if (!steps.isEmpty()) {
-                                        log.info("SSE 步骤: len={}", steps.length());
-                                    }
-                                    if (content != null && !content.isEmpty() || !steps.isEmpty()) {
-                                        StringBuilder json = new StringBuilder("{\"v\":");
-                                        json.append(toJsonString(content != null ? content : ""));
-                                        if (!steps.isEmpty()) {
-                                            json.append(",\"s\":[").append(steps).append("]");
-                                        }
-                                        json.append("}");
-                                        emitter.send(SseEmitter.event().data(json.toString()));
+                                    String step = buildStepFromEvent(event);
+                                    String content = extractTextFromEvent(event);
+                                    if (step != null && content != null && !content.isEmpty()) {
+                                        emitter.send(SseEmitter.event().data(
+                                                "{\"v\":" + toJsonString(content)
+                                                + ",\"s\":[" + step + "]}"));
+                                    } else if (step != null) {
+                                        emitter.send(SseEmitter.event().data(
+                                                "{\"v\":\"\",\"s\":" + step + "}"));
+                                    } else if (content != null && !content.isEmpty()) {
+                                        emitter.send(SseEmitter.event().data(
+                                                "{\"v\":" + toJsonString(content) + "}"));
                                     }
                                 } catch (Exception e) {
                                     log.error("流式对话发送失败", e);
                                     emitter.completeWithError(e);
                                 }
                             },
-                            error -> {
-                                scheduler.shutdownNow();
-                                emitter.completeWithError(error);
-                            },
-                            () -> {
-                                // 流结束后最后再排空一次
-                                try {
-                                    String chunk;
-                                    while ((chunk = buffer.drainOne()) != null) {
-                                        StringBuilder json = new StringBuilder("{\"v\":\"\",\"s\":");
-                                        json.append(chunk);  // chunk 已是完整 JSON 对象
-                                        json.append("}");
-                                        emitter.send(SseEmitter.event().data(json.toString()));
-                                    }
-                                } catch (Exception ignored) {}
-                                scheduler.shutdownNow();
-                                emitter.complete();
-                            }
+                            error -> emitter.completeWithError(error),
+                            () -> emitter.complete()
                     );
         } catch (Exception e) {
-            scheduler.shutdownNow();
             log.error("流式对话失败", e);
             emitter.completeWithError(e);
         }
         return emitter;
+    }
+
+    /** 从 ADK Event 构建步骤 JSON */
+    private String buildStepFromEvent(Event event) {
+        var fcs = event.functionCalls();
+        var frs = event.functionResponses();
+        if (fcs.isEmpty() && frs.isEmpty()) return null;
+
+        if (!fcs.isEmpty()) {
+            FunctionCall fc = fcs.get(0);
+            String name = fc.name().orElse("unknown");
+            String args = fc.args().map(Object::toString).orElse("");
+            return "{\"t\":\"tool_call\",\"n\":\"" + esc(name) + "\",\"a\":\""
+                    + esc(truncate(args, 200)) + "\"}";
+        }
+        if (!frs.isEmpty()) {
+            FunctionResponse fr = frs.get(0);
+            String name = fr.name().orElse("unknown");
+            String resp = fr.response().map(Object::toString).orElse("");
+            return "{\"t\":\"tool_result\",\"n\":\"" + esc(name) + "\",\"r\":\""
+                    + esc(truncate(resp, 500)) + "\"}";
+        }
+        return null;
+    }
+
+    /** 从 ADK Event 提取纯文本内容（排除 function call/response） */
+    private String extractTextFromEvent(Event event) {
+        return event.content()
+                .flatMap(c -> c.parts())
+                .map(parts -> parts.stream()
+                        .filter(p -> p.text().isPresent())
+                        .map(p -> p.text().get())
+                        .reduce("", String::concat))
+                .orElse("");
+    }
+
+    /** JSON 字符串转义 */
+    private static String esc(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", " ")
+                .replace("\r", "")
+                .replace("\t", " ");
+    }
+
+    /** 截断字符串至 maxLen */
+    private static String truncate(String s, int maxLen) {
+        if (s == null) return "";
+        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
     private static String toJsonString(String s) {

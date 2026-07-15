@@ -1,24 +1,23 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.node;
 
+import com.google.adk.tools.BaseTool;
+import com.google.adk.tools.BaseToolset;
 import jakarta.annotation.Resource;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ArmoryCommandEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySupport;
-import jainingfei.site.ai.agent.domain.agent.service.armory.OpenAiChatModelAdapter;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.mcp.client.ToolCallbackBaseTool;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.mcp.client.factory.McpCreateFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.skills.ToolSkillsCreateService;
-import io.micrometer.observation.ObservationRegistry;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.toolset.StaticToolset;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
-import org.springframework.ai.model.tool.DefaultToolCallingManager;
-import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.resolution.StaticToolCallbackResolver;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -28,8 +27,12 @@ import java.util.List;
  * 大模型 + 工具装配节点。
  * <p>
  * 所有工具（MCP remote/stdio/local + Skills）统一转为 {@link ToolCallback}，
- * 通过 {@link ToolCallingManager} 注入 {@link OpenAiChatModel}。
- * ADK 不再管理任何工具，只负责 Agent 编排。
+ * 通过 {@link OpenAiChatOptions#toolCallbacks()} 声明给 LLM，
+ * 同时包装为 {@link BaseToolset} 注册到 Google ADK 的 {@code LlmAgent.tools()}，
+ * 由 ADK 原生管理工具调用循环。
+ * <p>
+ * V2.1: 升级 Google ADK 1.6.0 后移除 {@code OpenAiChatModelAdapter}，
+ * 工具执行改为由 ADK 的 {@code LlmAgent} 原生处理。
  */
 @Slf4j
 @Service
@@ -84,15 +87,15 @@ public class ChatModelNode extends AbstractArmorySupport {
             allToolCallbacks.addAll(toolSkillsCreateService.getToolCallbacks(toolSkillsList));
         }
 
-        // 2. 构建 ToolCallingManager（执行工具调用）
-        ToolCallingManager toolCallingManager = null;
+        // 2. 创建 BaseToolset（供 ADK 原生管理工具调用循环）
         if (!allToolCallbacks.isEmpty()) {
-            StaticToolCallbackResolver toolResolver = new StaticToolCallbackResolver(allToolCallbacks);
-            toolCallingManager = DefaultToolCallingManager.builder()
-                    .observationRegistry(ObservationRegistry.NOOP)
-                    .toolCallbackResolver(toolResolver)
-                    .build();
-            log.info("ToolCallingManager 已创建, toolCount:{}", allToolCallbacks.size());
+            List<BaseTool> baseTools = new ArrayList<>();
+            for (ToolCallback tc : allToolCallbacks) {
+                baseTools.add(new ToolCallbackBaseTool(tc));
+            }
+            BaseToolset toolset = new StaticToolset(baseTools);
+            dynamicContext.getMcpToolsets().add(toolset);
+            log.info("BaseToolset 已创建并注册到 ADK, toolCount:{}", baseTools.size());
         }
 
         // 3. OpenAiChatOptions（带 toolCallbacks，声明工具给 LLM）
@@ -104,21 +107,12 @@ public class ChatModelNode extends AbstractArmorySupport {
                 .build();
         log.info("OpenAiChatOptions 已创建, toolCallbacks:{}", allToolCallbacks.size());
 
-        // 3b. 无工具的 clean options（工具执行后第二轮使用，防止死循环）
-        OpenAiChatOptions cleanOptions = OpenAiChatOptions.builder()
-                .baseUrl(chatModelConfig.getBaseUrl())
-                .apiKey(chatModelConfig.getApiKey())
-                .model(chatModelConfig.getModel())
-                .build();
-
-        // 4. 构建 OpenAiChatModel（不传 ToolCallingManager，由 adapter 管理工具循环）
+        // 4. 构建 OpenAiChatModel（直接传给 ADK SpringAI 适配器，
+        //    工具声明在 OpenAiChatOptions 中，工具执行由 ADK LlmAgent 管理）
         OpenAiChatModel openAiChatModel = OpenAiChatModel.builder()
                 .options(chatOptions)
                 .build();
-
-        OpenAiChatModelAdapter adapter = new OpenAiChatModelAdapter(
-                openAiChatModel, chatOptions, cleanOptions, toolCallingManager);
-        dynamicContext.setChatModel(adapter);
+        dynamicContext.setChatModel(openAiChatModel);
 
         return router(requestParameter, dynamicContext);
     }
