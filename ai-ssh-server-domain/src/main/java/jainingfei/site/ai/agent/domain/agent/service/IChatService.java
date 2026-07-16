@@ -18,6 +18,18 @@ public interface IChatService {
 
     Flowable<Event> handleMessageStream(String agentId, String userId, String sessionId, String message);
 
+    /**
+     * 流式对话（携带 SSH 终端会话 ID）
+     *
+     * @param agentId           智能体 ID
+     * @param userId            用户 ID
+     * @param sessionId         对话会话 ID
+     * @param message           消息内容
+     * @param terminalSessionId SSH 终端会话 ID（用于工具调用）
+     * @return 事件流
+     */
+    Flowable<Event> handleMessageStream(String agentId, String userId, String sessionId, String message, String terminalSessionId);
+
     List<String> handleMessage(ChatCommandEntity chatCommandEntity);
 
     void clearHistory(String sessionId);

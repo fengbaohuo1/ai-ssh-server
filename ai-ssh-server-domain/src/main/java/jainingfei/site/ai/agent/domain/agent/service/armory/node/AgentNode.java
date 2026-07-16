@@ -1,8 +1,8 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.node;
 
 import com.google.adk.agents.LlmAgent;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.adk.FixedSpringAI;
 import com.google.adk.tools.BaseToolset;
+import com.google.adk.tools.FunctionTool;
 import jakarta.annotation.Resource;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ArmoryCommandEntity;
@@ -10,6 +10,9 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySupport;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.adk.FixedSpringAI;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.toolset.StaticToolset;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
@@ -22,6 +25,9 @@ public class AgentNode extends AbstractArmorySupport {
     @Resource
     private AgentWorkflowNode agentWorkflowNode;
 
+    @Resource
+    private SshExecuteAdkTool sshExecuteAdkTool;
+
     @Override
     protected AiAgentRegisterVO doApply(ArmoryCommandEntity requestParameter, DefaultArmoryFactory.DynamicContext dynamicContext) throws Exception {
         log.info("Ai Agent 装配操作 - AgentNode");
@@ -30,6 +36,15 @@ public class AgentNode extends AbstractArmorySupport {
         List<BaseToolset> mcpToolsets = dynamicContext.getMcpToolsets();
         AiAgentConfigTableVO aiAgentConfigTableVO = requestParameter.getAiAgentConfigTableVO();
         List<AiAgentConfigTableVO.Module.Agent> agents = aiAgentConfigTableVO.getModule().getAgents();
+
+        // 注册 ADK 原生工具：SSH 命令执行
+        try {
+            FunctionTool sshTool = FunctionTool.create(sshExecuteAdkTool, "executeCommand");
+            mcpToolsets.add(new StaticToolset(List.of(sshTool)));
+            log.info("SSH 执行 ADK 工具注册成功");
+        } catch (Exception e) {
+            log.error("创建 SSH ADK 工具失败", e);
+        }
 
         for (AiAgentConfigTableVO.Module.Agent agentConfig : agents) {
             LlmAgent llmAgent = LlmAgent.builder()

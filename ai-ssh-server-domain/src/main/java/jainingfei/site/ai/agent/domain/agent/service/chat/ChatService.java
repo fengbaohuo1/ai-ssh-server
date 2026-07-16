@@ -14,6 +14,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.AiAgentAutoConfigProperties;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
 import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
@@ -127,6 +128,41 @@ public class ChatService implements IChatService {
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
         // 将对话历史嵌入当前消息文本，确保 LLM 看到完整上下文
+        String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message);
+
+        // 捕获流式响应文本，用于完成后追加历史
+        StringBuilder responseCapture = new StringBuilder();
+        Content userMsg = Content.fromParts(Part.fromText(contextualizedMessage));
+        return runner.runAsync(userId, effectiveSessionId, userMsg,
+                        RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build())
+                .doOnNext(event -> {
+                    String content = event.stringifyContent();
+                    if (content != null && !content.isEmpty()) {
+                        responseCapture.append(content);
+                    }
+                })
+                .doOnComplete(() -> {
+                    appendToHistory(effectiveSessionId, message, responseCapture.toString());
+                });
+    }
+
+    @Override
+    public Flowable<Event> handleMessageStream(String agentId, String userId, String sessionId, String message, String terminalSessionId) {
+        AiAgentRegisterVO aiAgentRegisterVO = defaultArmoryFactory.getAiAgentRegisterVO(agentId);
+        if (null == aiAgentRegisterVO) {
+            throw new AppException(ResponseCode.E0001.getCode());
+        }
+
+        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
+
+        // 将终端会话 ID 设置到 ThreadLocal，供 SshExecuteAdkTool 使用
+        if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
+            log.info("设置终端会话 ID: {}", terminalSessionId);
+            SshExecuteAdkTool.setCurrentTerminalSession(terminalSessionId);
+        }
+
+        // 将对话历史嵌入当前消息文本
         String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message);
 
         // 捕获流式响应文本，用于完成后追加历史

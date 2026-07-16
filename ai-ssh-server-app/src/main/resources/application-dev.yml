@@ -23,7 +23,8 @@ spring:
     import:
 #      - classpath:agent/test-agent.yml
 #      - classpath:agent/parallel_research_app.yml
-      - optional:classpath:agent/only-one-agent.yml
+#      - optional:classpath:agent/only-one-agent.yml
+      - classpath:agent/ssh-agent.yml
 
 # MyBatis-Plus 配置
 mybatis-plus:

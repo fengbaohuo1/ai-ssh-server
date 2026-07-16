@@ -107,7 +107,9 @@ public class AgentServiceController implements IAgentService {
         SseEmitter emitter = new SseEmitter(3 * 60 * 1000L);
         try { emitter.send(SseEmitter.event().data("{\"v\":\"\",\"s\":{\"t\":\"thinking\"}}")); } catch (Exception ignored) {}
         try {
-            chatService.handleMessageStream(dto.getAgentId(), dto.getUserId(), dto.getSessionId(), dto.getMessage())
+            chatService.handleMessageStream(
+                            dto.getAgentId(), dto.getUserId(), dto.getSessionId(), dto.getMessage(),
+                            dto.getTerminalSessionId())
                     .subscribe(
                             event -> sendSse(emitter, event),
                             error -> emitter.completeWithError(error),
