@@ -1,5 +1,6 @@
 package jainingfei.site.ai.agent.domain.ssh.service.impl;
 
+import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.ssh.adapter.port.ITerminalSessionPort;
 import jainingfei.site.ai.agent.domain.ssh.adapter.port.ISshSessionPort;
 import jainingfei.site.ai.agent.domain.ssh.model.entity.TerminalSessionEntity;
@@ -21,17 +22,14 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class SshTerminalService implements ISshTerminalService {
 
-    private final ISshSessionPort sshSessionPort;
-    private final ITerminalSessionPort terminalSessionPort;
+    @Resource
+    private ISshSessionPort sshSessionPort;
+
+    @Resource
+    private ITerminalSessionPort terminalSessionPort;
 
     /** sessionId → 终端会话实体 */
     private final Map<String, TerminalSessionEntity> sessionCache = new ConcurrentHashMap<>();
-
-    public SshTerminalService(ISshSessionPort sshSessionPort,
-                              ITerminalSessionPort terminalSessionPort) {
-        this.sshSessionPort = sshSessionPort;
-        this.terminalSessionPort = terminalSessionPort;
-    }
 
     @Override
     public TerminalSessionEntity openTerminal(String connectionId, int cols, int rows) {

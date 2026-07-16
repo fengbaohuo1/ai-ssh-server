@@ -1,6 +1,7 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
 
 import com.google.adk.tools.Annotations;
+import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshTerminalService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -29,11 +30,8 @@ public class SshExecuteAdkTool {
     /** 终端会话 ID（静态字段，ADK 工具在异步线程中执行时仍可访问） */
     private static String currentTerminalSessionId;
 
-    private final ISshTerminalService sshTerminalService;
-
-    public SshExecuteAdkTool(ISshTerminalService sshTerminalService) {
-        this.sshTerminalService = sshTerminalService;
-    }
+    @Resource
+    private ISshTerminalService sshTerminalService;
 
     /**
      * 设置终端会话 ID（静态字段，所有线程可见）

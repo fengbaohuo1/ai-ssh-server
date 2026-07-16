@@ -3,6 +3,7 @@ package jainingfei.site.ai.agent.infrastructure.adapter.port;
 import com.jcraft.jsch.ChannelShell;
 import com.jcraft.jsch.JSchException;
 import com.jcraft.jsch.Session;
+import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.ssh.adapter.port.ITerminalSessionPort;
 import jainingfei.site.ai.agent.domain.ssh.adapter.port.ISshSessionPort;
 import lombok.extern.slf4j.Slf4j;
@@ -23,20 +24,17 @@ import java.util.concurrent.ConcurrentHashMap;
  * 每个终端会话对应一个 JSch ChannelShell，后台线程持续读取输出到缓冲区，
  * {@link #read(String)} 返回缓冲区内容并清空。
  * <p>
- * 通过注入 {@link ISshSessionPort} 获取已连接的 JSch Session。
+ * 注入 {@link ISshSessionPort} 获取已连接的 JSch Session。
  */
 @Slf4j
 @Component
 public class TerminalSessionPort implements ITerminalSessionPort {
 
-    private final ISshSessionPort sshSessionPort;
+    @Resource
+    private ISshSessionPort sshSessionPort;
 
     /** sessionId → 终端会话数据 */
     private final Map<String, SessionData> sessions = new ConcurrentHashMap<>();
-
-    public TerminalSessionPort(ISshSessionPort sshSessionPort) {
-        this.sshSessionPort = sshSessionPort;
-    }
 
     @Override
     public String openTerminal(String connectionId, int cols, int rows) {
