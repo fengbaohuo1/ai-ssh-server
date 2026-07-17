@@ -11,6 +11,7 @@ import jainingfei.site.ai.agent.domain.ssh.model.entity.SshConnectionEntity;
 import jainingfei.site.ai.agent.domain.ssh.model.valobj.enums.AuthTypeEnum;
 import jainingfei.site.ai.agent.domain.ssh.model.valobj.enums.ConnectionStatusEnum;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshConnectionService;
+import jainingfei.site.ai.agent.infrastructure.adapter.session.UnifiedSessionManager;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
 import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
@@ -33,6 +34,9 @@ public class SshConnectionController implements ISshConnectionApiService {
 
     @Resource
     private ISshConnectionService sshConnectionService;
+
+    @Resource
+    private UnifiedSessionManager unifiedSessionManager;
 
     @PostMapping("/create")
     @Override
@@ -137,6 +141,8 @@ public class SshConnectionController implements ISshConnectionApiService {
             log.info("断开SSH连接 connectionId={}", connectionId);
 
             sshConnectionService.disconnect(connectionId);
+            // 清理统一终端会话（ChannelShell）
+            unifiedSessionManager.closeSession(connectionId);
 
             return Response.<Void>builder()
                     .code(ResponseCode.SUCCESS.getCode())

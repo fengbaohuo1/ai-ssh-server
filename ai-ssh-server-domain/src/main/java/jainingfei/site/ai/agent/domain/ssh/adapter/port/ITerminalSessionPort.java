@@ -1,52 +1,34 @@
 package jainingfei.site.ai.agent.domain.ssh.adapter.port;
 
 /**
- * 终端会话端口接口 — 定义基础设施层必须实现的终端（ChannelShell）操作。
+ * 终端会话端口接口 — 定义基础设施层必须实现的终端操作。
  * <p>
  * 遵循 DDD 端口适配器模式：领域层定义接口，基础设施层实现。
- * 负责管理 JSch ChannelShell 的生命周期（打开、读写、调整大小、关闭）。
+ * 一个连接只有一个终端会话，AI 和用户共用。
  */
 public interface ITerminalSessionPort {
 
     /**
-     * 打开终端会话
+     * 执行命令并返回输出（终端会话不存在时自动创建）
      *
-     * @param connectionId 已建立的 SSH 连接 ID
-     * @param cols         终端列数
-     * @param rows         终端行数
-     * @return 终端会话唯一标识
+     * @param connectionId 已连接的 SSH 连接 ID
+     * @param command      要执行的 Shell 命令
+     * @return 命令输出文本
      */
-    String openTerminal(String connectionId, int cols, int rows);
+    String executeCommand(String connectionId, String command);
 
     /**
-     * 向终端写入命令（追加换行符）
+     * 检查终端会话是否存在且活跃
      *
-     * @param sessionId 终端会话 ID
-     * @param command   要执行的命令
+     * @param connectionId SSH 连接 ID
+     * @return true 如果会话存在
      */
-    void write(String sessionId, String command);
-
-    /**
-     * 从终端读取当前输出（非阻塞，返回缓冲区内容并清空）
-     *
-     * @param sessionId 终端会话 ID
-     * @return 终端输出文本
-     */
-    String read(String sessionId);
-
-    /**
-     * 调整终端窗口大小
-     *
-     * @param sessionId 终端会话 ID
-     * @param cols      新的列数
-     * @param rows      新的行数
-     */
-    void resize(String sessionId, int cols, int rows);
+    boolean sessionExists(String connectionId);
 
     /**
      * 关闭终端会话
      *
-     * @param sessionId 终端会话 ID
+     * @param connectionId SSH 连接 ID
      */
-    void closeSession(String sessionId);
+    void closeSession(String connectionId);
 }

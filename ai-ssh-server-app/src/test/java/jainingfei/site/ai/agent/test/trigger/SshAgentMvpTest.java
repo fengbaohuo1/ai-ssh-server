@@ -8,7 +8,6 @@ import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExec
 import jainingfei.site.ai.agent.domain.ssh.model.aggregate.SshConnectionAggregate;
 import jainingfei.site.ai.agent.domain.ssh.model.entity.SshConnectionConfigEntity;
 import jainingfei.site.ai.agent.domain.ssh.model.entity.SshConnectionEntity;
-import jainingfei.site.ai.agent.domain.ssh.model.entity.TerminalSessionEntity;
 import jainingfei.site.ai.agent.domain.ssh.model.valobj.enums.AuthTypeEnum;
 import jainingfei.site.ai.agent.domain.ssh.model.valobj.enums.ConnectionStatusEnum;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshConnectionService;
@@ -23,15 +22,14 @@ import java.util.Scanner;
 import java.util.UUID;
 
 /**
- * SSH Agent MVP 集成测试。
+ * SSH Agent MVP 集成测试（统一终端会话版本）。
  * <p>
- * 最小可用版本：启动后自动连接服务器，在控制台输入自然语言指令，
+ * 启动后自动连接服务器，在控制台输入自然语言指令，
  * AI Agent 自动调用 executeCommand 工具执行 SSH 命令，并返回分析结果。
  * <p>
- * 使用前请修改下方 SSH_SERVER 配置为你自己的服务器信息。
+ * 输出通过 SSE 实时显示在控制台，终端操作同步到共享 ChannelShell。
  * <p>
- * 模型使用 deepseek-v4-flash（配置在 ssh-agent.yml），
- * 测试 ID 使用独立的 agent-id=100004, userId=mvp-test。
+ * 使用前请修改下方 SSH_SERVER 配置为你自己的服务器信息。
  */
 @Slf4j
 @SpringBootTest
@@ -57,15 +55,15 @@ public class SshAgentMvpTest {
     @Resource
     private IChatService chatService;
 
-    /** SSH 连接 ID */
+    /** SSH 连接 ID（同时也是统一终端会话的 key） */
     private String connectionId;
-    /** 终端会话 ID */
-    private String terminalSessionId;
     /** AI 对话会话 ID */
     private String chatSessionId;
 
     /**
-     * 初始化：创建连接 → 建立 SSH → 打开终端 → 创建对话会话 → 绑定 ThreadLocal
+     * 初始化：创建连接 → 建立 SSH → 创建对话会话 → 绑定 connectionId
+     * <p>
+     * 不再需要 {@code openTerminal}，统一终端会话在第一次 executeCommand 时自动创建。
      */
     @BeforeEach
     public void setUp() {
@@ -107,20 +105,13 @@ public class SshAgentMvpTest {
         }
         log.info("2. SSH 连接成功 host={}:{}", SSH_HOST, SSH_PORT);
 
-        // 3. 打开终端会话
-        TerminalSessionEntity terminal = sshTerminalService.openTerminal(connectionId, 120, 24);
-        terminalSessionId = terminal.getSessionId();
-        log.info("3. 终端会话已打开 terminalSessionId={}", terminalSessionId);
-
-        // 4. 创建 AI 对话会话
+        // 3. 创建 AI 对话会话
         chatSessionId = chatService.createSession(AGENT_ID, USER_ID);
-        log.info("4. AI 对话会话已创建 chatSessionId={}", chatSessionId);
+        log.info("3. AI 对话会话已创建 chatSessionId={}", chatSessionId);
 
-        // 5. 绑定终端会话到 ThreadLocal
-        // 核心！executeCommand 工具从这里取 terminalSessionId
-        SshExecuteAdkTool.setCurrentTerminalSession(terminalSessionId);
-        log.info("5. ThreadLocal 已绑定终端会话");
-
+        // 4. 绑定 connectionId 到静态字段（供 SshExecuteAdkTool 在 ADK 线程中读取）
+        SshExecuteAdkTool.setCurrentTerminalSession(connectionId);
+        log.info("4. 已绑定 SSH 连接 connectionId={}", connectionId);
         log.info("========== MVP 初始化完成，可以开始对话了 ==========\n");
     }
 
@@ -151,12 +142,12 @@ public class SshAgentMvpTest {
             }
 
             try {
-                // 每次对话前重新绑定 ThreadLocal（防止异步线程丢失）
-                SshExecuteAdkTool.setCurrentTerminalSession(terminalSessionId);
+                // 每次对话前重新绑定 connectionId（防止异步线程丢失上下文）
+                SshExecuteAdkTool.setCurrentTerminalSession(connectionId);
 
                 System.out.print("AI > ");
                 chatService.handleMessageStream(
-                                AGENT_ID, USER_ID, chatSessionId, input, terminalSessionId)
+                                AGENT_ID, USER_ID, chatSessionId, input, connectionId)
                         .blockingForEach(event -> {
                             String text = event.stringifyContent();
                             if (!text.isEmpty()) {
@@ -179,13 +170,13 @@ public class SshAgentMvpTest {
      */
     @Test
     public void test_singleChat() {
-        SshExecuteAdkTool.setCurrentTerminalSession(terminalSessionId);
+        SshExecuteAdkTool.setCurrentTerminalSession(connectionId);
 
         String message = "查看服务器系统信息，包括操作系统版本、CPU、内存";
         log.info("发送消息: {}", message);
 
         System.out.print("\nAI > ");
-        chatService.handleMessageStream(AGENT_ID, USER_ID, chatSessionId, message, terminalSessionId)
+        chatService.handleMessageStream(AGENT_ID, USER_ID, chatSessionId, message, connectionId)
                 .blockingForEach(event -> {
                     String text = event.stringifyContent();
                     if (!text.isEmpty()) {
@@ -197,6 +188,8 @@ public class SshAgentMvpTest {
 
     /**
      * 直接测试 SSH 命令执行（不经过 AI），验证 SSH 终端链路是否通畅。
+     * <p>
+     * 现在使用 connectionId 代替旧的 terminalSessionId。
      */
     @Test
     public void test_directCommand() {
@@ -212,7 +205,8 @@ public class SshAgentMvpTest {
 
         for (String cmd : commands) {
             System.out.println("\n--- 执行: " + cmd + " ---");
-            String output = sshTerminalService.executeCommand(terminalSessionId, cmd);
+            // 使用 connectionId 直接执行（内部自动创建/获取统一终端会话）
+            String output = sshTerminalService.executeCommand(connectionId, cmd);
             System.out.println(output);
         }
     }

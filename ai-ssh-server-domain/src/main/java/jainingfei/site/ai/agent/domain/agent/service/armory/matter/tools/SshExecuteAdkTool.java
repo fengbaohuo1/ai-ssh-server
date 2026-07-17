@@ -12,47 +12,48 @@ import java.util.Map;
 /**
  * SSH 命令执行 ADK 工具 — 为智能体提供在 SSH 终端执行命令的能力。
  * <p>
- * 使用静态字段持有终端会话 ID（ADK 使用线程池，ThreadLocal 无法跨线程传递）。
- * 通过 ADK 原生 FunctionTool.create() 注册到 LlmAgent。
+ * 使用静态字段持有 connectionId（ADK 使用线程池，ThreadLocal 无法跨线程传递）。
+ * 通过 ADK 原生 {@code FunctionTool.create()} 注册到 LlmAgent。
  *
  * <pre>
  * 调用链路:
- *   AgentServiceController → ChatService (set terminalSessionId)
+ *   AgentServiceController → ChatService (set currentConnectionId)
  *     → InMemoryRunner.runAsync() → LlmAgent
  *       → SshExecuteAdkTool.executeCommand (read static field)
- *         → ISshTerminalService.executeCommand()
+ *         → ISshTerminalService.executeCommand(connectionId, command)
+ *           → UnifiedSessionManager.executeCommand()
  * </pre>
  */
 @Slf4j
 @Service
 public class SshExecuteAdkTool {
 
-    /** 终端会话 ID（静态字段，ADK 工具在异步线程中执行时仍可访问） */
-    private static String currentTerminalSessionId;
+    /** 当前绑定的 SSH 连接 ID（静态字段，ADK 线程池中仍可访问） */
+    private static String currentConnectionId;
 
     @Resource
     private ISshTerminalService sshTerminalService;
 
     /**
-     * 设置终端会话 ID（静态字段，所有线程可见）
+     * 设置当前绑定的 SSH 连接 ID
      */
-    public static void setCurrentTerminalSession(String terminalSessionId) {
-        currentTerminalSessionId = terminalSessionId;
-        log.trace("[SshExecuteAdkTool] 设置终端会话: thread={}, terminalSession={}",
-                Thread.currentThread().getName(), terminalSessionId);
+    public static void setCurrentTerminalSession(String connectionId) {
+        currentConnectionId = connectionId;
+        log.trace("[SshExecuteAdkTool] 设置连接: thread={}, connectionId={}",
+                Thread.currentThread().getName(), connectionId);
     }
 
     /**
-     * 清除终端会话 ID
+     * 清除绑定
      */
     public static void clearCurrentTerminalSession() {
-        currentTerminalSessionId = null;
+        currentConnectionId = null;
     }
 
     /**
      * 在 SSH 终端执行命令并返回输出。
      * <p>
-     * 被 {@link FunctionTool#create(Object, String)} 识别为 ADK 原生工具。
+     * 被 {@code FunctionTool.create(bean, "executeCommand")} 识别为 ADK 原生工具。
      *
      * @param command 要执行的 Shell 命令
      * @return 包含 command / output / success / suggestion 的结构化结果
@@ -60,32 +61,32 @@ public class SshExecuteAdkTool {
     public Map<String, Object> executeCommand(
             @Annotations.Schema(name = "command", description = "要执行的 Shell 命令，如: ls -la, apt install docker.io, docker --version")
             String command) {
-        String terminalSessionId = currentTerminalSessionId;
+        String connectionId = currentConnectionId;
 
-        log.info("[executeCommand] thread={} terminalSessionId={} command={}",
-                Thread.currentThread().getName(), terminalSessionId, command);
+        log.info("[executeCommand] thread={} connectionId={} command={}",
+                Thread.currentThread().getName(), connectionId, command);
 
-        if (terminalSessionId == null || terminalSessionId.isEmpty()) {
-            log.warn("[executeCommand] 终端会话 ID 为空");
+        if (connectionId == null || connectionId.isEmpty()) {
+            log.warn("[executeCommand] 未绑定 SSH 连接");
             return Map.of(
                     "success", false,
-                    "output", "未绑定 SSH 终端会话。请先打开 SSH 终端连接。",
+                    "output", "未绑定 SSH 终端会话。请先选择一台已连接的服务器。",
                     "command", command
             );
         }
 
-        if (!sshTerminalService.sessionExists(terminalSessionId)) {
-            log.warn("[executeCommand] 终端会话不存在: {}", terminalSessionId);
+        if (!sshTerminalService.sessionExists(connectionId)) {
+            log.warn("[executeCommand] 终端会话不存在: {}", connectionId);
             return Map.of(
                     "success", false,
-                    "output", "SSH 终端会话不存在或已关闭: " + terminalSessionId,
+                    "output", "SSH 终端会话不存在或已关闭: " + connectionId,
                     "command", command
             );
         }
 
         try {
-            log.info("SSH 执行命令: session={} command={}", terminalSessionId, command);
-            String output = sshTerminalService.executeCommand(terminalSessionId, command);
+            log.info("SSH 执行命令: connectionId={} command={}", connectionId, command);
+            String output = sshTerminalService.executeCommand(connectionId, command);
             log.info("SSH 命令执行完成: outputLength={}", output.length());
 
             boolean success = isExecutionSuccessful(output);
@@ -102,7 +103,7 @@ public class SshExecuteAdkTool {
             return result;
 
         } catch (Exception e) {
-            log.error("SSH 命令执行异常: session={} command={}", terminalSessionId, command, e);
+            log.error("SSH 命令执行异常: connectionId={} command={}", connectionId, command, e);
             return Map.of(
                     "success", false,
                     "output", "命令执行异常: " + e.getMessage(),

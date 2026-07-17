@@ -1,122 +1,132 @@
 package jainingfei.site.ai.agent.trigger.http.websocket;
 
-import com.jcraft.jsch.ChannelShell;
-import com.jcraft.jsch.Session;
 import jakarta.annotation.Resource;
-import jakarta.annotation.PreDestroy;
-import jainingfei.site.ai.agent.domain.ssh.adapter.port.ISshSessionPort;
+import jainingfei.site.ai.agent.infrastructure.adapter.session.UnifiedSessionManager;
+import jainingfei.site.ai.agent.infrastructure.adapter.session.UnifiedSessionManager.UnifiedTerminalSession;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
-
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
 import org.springframework.web.util.UriTemplate;
 
+import java.io.IOException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * SSH 终端 WebSocket Handler — 统一终端会话版本。
+ * <p>
+ * 不再自己创建 ChannelShell，改为委托 {@link UnifiedSessionManager}：
+ * <ul>
+ *   <li>连接建立 → {@link UnifiedSessionManager#getOrCreate} 获取共享会话</li>
+ *   <li>注册监听器，实时推送终端输出到 WebSocket</li>
+ *   <li>用户输入 → {@link UnifiedTerminalSession#writeUserInput}（AI 操作时自动丢弃）</li>
+ *   <li>连接断开 → 移除监听器（不关闭会话，AI 可能还在用）</li>
+ * </ul>
+ */
 @Slf4j
 @Component
 public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
 
     @Resource
-    private ISshSessionPort sshSessionPort;
+    private UnifiedSessionManager sessionManager;
 
-    private final ConcurrentHashMap<String, ChannelShell> channelMap = new ConcurrentHashMap<>();
-    private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "terminal-io");
-        t.setDaemon(true);
-        return t;
-    });
+    /** WebSocket 会话 ID → connectionId */
+    private final Map<String, String> wsToConnection = new ConcurrentHashMap<>();
+
+    /** WebSocket 会话 ID → 输出监听器（用于断开时移除） */
+    private final Map<String, ListenerHolder> wsToListener = new ConcurrentHashMap<>();
+
+    /** 单连接同步锁，保证 WebSocket sendMessage 线程安全 */
+    private static final Object SEND_LOCK = new Object();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession wsSession) throws Exception {
-        // 1. 从路径中提取 connectionId: /ws/terminal/{connectionId}
-        UriTemplate template = new UriTemplate("/ws/terminal/{connectionId}");
+        var template = new UriTemplate("/ws/terminal/{connectionId}");
         Map<String, String> vars = template.match(wsSession.getUri().getPath());
         String connectionId = vars.get("connectionId");
 
-        log.info("WebSocket terminal connected connectionId={} sessionId={}", connectionId, wsSession.getId());
+        log.info("WebSocket 终端连接 connectionId={} wsSessionId={}", connectionId, wsSession.getId());
 
-        // 2. 获取 JSch Session
-        Session jschSession = sshSessionPort.getSession(connectionId);
-        if (jschSession == null || !jschSession.isConnected()) {
-            log.error("SSH会话不存在或已断开 connectionId={}", connectionId);
-            wsSession.sendMessage(new TextMessage("[31mSSH会话不存在或已断开，请先连接服务器[0m\r\n"));
+        // 获取或创建统一终端会话
+        UnifiedTerminalSession session;
+        try {
+            session = sessionManager.getOrCreate(connectionId, 80, 24);
+        } catch (Exception e) {
+            log.error("获取终端会话失败 connectionId={}", connectionId, e);
+            sendMessage(wsSession, "[31mSSH 会话不存在或已断开，请先连接服务器[0m\r\n");
             wsSession.close(CloseStatus.SERVER_ERROR);
             return;
         }
 
-        try {
-            // 3. 打开 ChannelShell
-            ChannelShell channel = (ChannelShell) jschSession.openChannel("shell");
-            channel.setPtyType("xterm-256color");
-            channel.setAgentForwarding(false);
-            channel.connect(3000);
+        wsToConnection.put(wsSession.getId(), connectionId);
 
-            channelMap.put(wsSession.getId(), channel);
-
-            // 4. 启动线程：ChannelShell 输出流 → WebSocket
-            InputStream inputStream = channel.getInputStream();
-            executor.submit(() -> {
-                try {
-                    byte[] buffer = new byte[1024];
-                    int len;
-                    while ((len = inputStream.read(buffer)) != -1) {
-                        if (wsSession.isOpen()) {
-                            wsSession.sendMessage(new TextMessage(new String(buffer, 0, len, StandardCharsets.UTF_8)));
-                        }
-                    }
-                } catch (Exception e) {
-                    log.warn("终端IO读取结束 sessionId={}", wsSession.getId());
-                } finally {
-                    cleanup(wsSession.getId());
-                }
-            });
-
-        } catch (Exception e) {
-            log.error("打开终端通道失败 connectionId={}", connectionId, e);
-            wsSession.sendMessage(new TextMessage("[31m打开终端失败: " + e.getMessage() + "[0m\r\n"));
-            wsSession.close(CloseStatus.SERVER_ERROR);
-        }
+        // 注册监听器：终端输出 → WebSocket
+        var listener = new ListenerHolder(wsSession);
+        session.addListener(listener);
+        wsToListener.put(wsSession.getId(), listener);
     }
 
     @Override
-    protected void handleTextMessage(WebSocketSession wsSession, TextMessage message) throws Exception {
-        ChannelShell channel = channelMap.get(wsSession.getId());
-        if (channel != null) {
-            OutputStream out = channel.getOutputStream();
-            out.write(message.getPayload().getBytes(StandardCharsets.UTF_8));
-            out.flush();
+    protected void handleTextMessage(WebSocketSession wsSession, TextMessage message) {
+        String connectionId = wsToConnection.get(wsSession.getId());
+        if (connectionId == null) return;
+
+        try {
+            var session = sessionManager.getSession(connectionId);
+            session.writeUserInput(message.getPayload());
+        } catch (IllegalArgumentException e) {
+            log.warn("终端会话不存在 wsSessionId={}", wsSession.getId());
         }
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession wsSession, CloseStatus status) {
-        log.info("WebSocket terminal disconnected sessionId={}", wsSession.getId());
-        cleanup(wsSession.getId());
+        String connectionId = wsToConnection.remove(wsSession.getId());
+        var holder = wsToListener.remove(wsSession.getId());
+        if (connectionId != null && holder != null) {
+            try {
+                var session = sessionManager.getSession(connectionId);
+                session.removeListener(holder);
+            } catch (IllegalArgumentException ignored) {
+                // session 可能已被清理
+            }
+        }
+        log.info("WebSocket 终端断开 connectionId={} wsSessionId={}", connectionId, wsSession.getId());
     }
 
     @Override
     public void handleTransportError(WebSocketSession wsSession, Throwable exception) {
-        log.error("WebSocket传输错误 sessionId={}", wsSession.getId(), exception);
-        cleanup(wsSession.getId());
+        log.error("WebSocket 传输错误 wsSessionId={}", wsSession.getId(), exception);
+        afterConnectionClosed(wsSession, CloseStatus.SERVER_ERROR);
     }
 
-    private void cleanup(String sessionId) {
-        ChannelShell channel = channelMap.remove(sessionId);
-        if (channel != null && channel.isConnected()) {
-            channel.disconnect();
+    // ==================== 内部 ====================
+
+    /** 线程安全发送消息到 WebSocket */
+    private static void sendMessage(WebSocketSession ws, String text) {
+        synchronized (SEND_LOCK) {
+            if (ws.isOpen()) {
+                try {
+                    ws.sendMessage(new TextMessage(text));
+                } catch (IOException e) {
+                    log.warn("WebSocket 发送失败", e);
+                }
+            }
         }
     }
 
-    @PreDestroy
-    public void shutdown() {
-        executor.shutdownNow();
+    /** 监听器包装器，持有 WebSocket 引用并通过同步锁发送 */
+    private static class ListenerHolder implements java.util.function.Consumer<String> {
+        private final WebSocketSession wsSession;
+
+        ListenerHolder(WebSocketSession wsSession) {
+            this.wsSession = wsSession;
+        }
+
+        @Override
+        public void accept(String text) {
+            sendMessage(wsSession, text);
+        }
     }
 }

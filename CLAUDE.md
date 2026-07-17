@@ -25,6 +25,7 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 详细总结见 `D:\study\notes\ai-ssh\`：
 - [SSH 库表设计取舍.md](D:\study\notes\ai-ssh\SSH%20库表设计取舍.md) — 表拆分依据（访问频率×数据体积）、VO vs Entity 判定、MP 版本踩坑
 - [SSH 领域 DDD 分层落地.md](D:\study\notes\ai-ssh\SSH%20领域%20DDD%20分层落地.md) — 聚合设计、仓库/端口接口隔离、调用链路、踩坑记录
+- [人机共用终端——统一会话层设计与实现.md](D:\study\notes\ai-ssh\人机共用终端——统一会话层设计与实现.md) — WebSocket 和 AI 工具合并为一条终端通路，Marker 输出检测，写入锁
 
 ### 核心 API
 

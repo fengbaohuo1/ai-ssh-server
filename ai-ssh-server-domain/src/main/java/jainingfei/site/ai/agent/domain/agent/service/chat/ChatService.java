@@ -156,9 +156,10 @@ public class ChatService implements IChatService {
         InMemoryRunner runner = aiAgentRegisterVO.getRunner();
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
-        // 将终端会话 ID 设置到 ThreadLocal，供 SshExecuteAdkTool 使用
+        // 将 SSH 连接 ID 设置到静态字段，供 SshExecuteAdkTool 在 ADK 线程中读取
+        // terminalSessionId 字段携带的是 connectionId（统一终端会话后，以 connectionId 为 key）
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
-            log.info("设置终端会话 ID: {}", terminalSessionId);
+            log.info("设置 SSH 连接 ID: {}", terminalSessionId);
             SshExecuteAdkTool.setCurrentTerminalSession(terminalSessionId);
         }
 
