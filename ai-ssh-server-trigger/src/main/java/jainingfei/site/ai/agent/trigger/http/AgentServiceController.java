@@ -137,10 +137,16 @@ public class AgentServiceController implements IAgentService {
         if (fcs.isEmpty() && frs.isEmpty()) return null;
         if (!fcs.isEmpty()) {
             FunctionCall fc = fcs.get(0);
-            return "{\"t\":\"tool_call\",\"n\":\"" + esc(fc.name().orElse("")) + "\",\"a\":\"" + esc(trunc(fc.args().map(Object::toString).orElse(""), 200)) + "\"}";
+            String args = fc.args().map(a -> {
+                try { return MAPPER.writeValueAsString(a); } catch (Exception ex) { return a.toString(); }
+            }).orElse("");
+            return "{\"t\":\"tool_call\",\"n\":\"" + esc(fc.name().orElse("")) + "\",\"a\":" + esc(trunc(args, 500)) + "}";
         }
         FunctionResponse fr = frs.get(0);
-        return "{\"t\":\"tool_result\",\"n\":\"" + esc(fr.name().orElse("")) + "\",\"r\":\"" + esc(trunc(fr.response().map(Object::toString).orElse(""), 500)) + "\"}";
+        String resp = fr.response().map(r -> {
+            try { return MAPPER.writeValueAsString(r); } catch (Exception ex) { return r.toString(); }
+        }).orElse("");
+        return "{\"t\":\"tool_result\",\"n\":\"" + esc(fr.name().orElse("")) + "\",\"r\":" + esc(trunc(resp, 1000)) + "}";
     }
 
     private String eventText(Event e) {
