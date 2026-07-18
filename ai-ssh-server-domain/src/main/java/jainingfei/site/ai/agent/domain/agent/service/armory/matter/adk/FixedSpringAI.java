@@ -173,11 +173,12 @@ public class FixedSpringAI extends BaseLlm {
 
     // ===== ChatResponse → LlmResponse =====
 
-    /** 过滤 Spring AI 流式空/纯空白 chunk——没有有效文本也没有工具调用的事件不传给 ADK */
+    /** 过滤 Spring AI 流式的完全空 chunk（没有文本也没有工具调用）。
+     *  注意：不过滤纯空白文本（如 \\n\\n），那是 LLM 的段落分隔，交给 Controller 缓冲处理。 */
     private boolean isNotEmpty(ChatResponse cr) {
         if (cr == null || cr.getResults().isEmpty()) return false;
         AssistantMessage am = cr.getResult().getOutput();
-        boolean hasText = am.getText() != null && !am.getText().trim().isEmpty();
+        boolean hasText = am.getText() != null && !am.getText().isEmpty();
         boolean hasTools = !am.getToolCalls().isEmpty();
         return hasText || hasTools;
     }
