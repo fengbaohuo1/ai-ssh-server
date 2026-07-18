@@ -68,20 +68,20 @@ public class SshExecuteAdkTool {
 
         if (connectionId == null || connectionId.isEmpty()) {
             log.warn("[executeCommand] 未绑定 SSH 连接");
-            return Map.of(
-                    "success", false,
-                    "output", "未绑定 SSH 终端会话。请先选择一台已连接的服务器。",
-                    "command", command
-            );
+            Map<String, Object> r = new HashMap<>();
+            r.put("success", false);
+            r.put("output", "未绑定 SSH 终端会话。请先选择一台已连接的服务器。");
+            r.put("command", command);
+            return r;
         }
 
         if (command == null || command.isEmpty()) {
             log.warn("[executeCommand] 未提供命令");
-            return Map.of(
-                    "success", false,
-                    "output", "未提供要执行的命令。请明确指定需要执行的 Shell 命令。",
-                    "command", command
-            );
+            Map<String, Object> r = new HashMap<>();
+            r.put("success", false);
+            r.put("output", "未提供要执行的命令。请明确指定需要执行的 Shell 命令。");
+            r.put("command", command);
+            return r;
         }
 
         if (!sshTerminalService.sessionExists(connectionId)) {
@@ -113,11 +113,11 @@ public class SshExecuteAdkTool {
 
         } catch (Exception e) {
             log.error("SSH 命令执行异常: connectionId={} command={}", connectionId, command, e);
-            return Map.of(
-                    "success", false,
-                    "output", "命令执行异常: " + e.getMessage(),
-                    "command", command
-            );
+            Map<String, Object> r = new HashMap<>();
+            r.put("success", false);
+            r.put("output", "命令执行异常: " + e.getMessage());
+            r.put("command", command);
+            return r;
         }
     }
 
