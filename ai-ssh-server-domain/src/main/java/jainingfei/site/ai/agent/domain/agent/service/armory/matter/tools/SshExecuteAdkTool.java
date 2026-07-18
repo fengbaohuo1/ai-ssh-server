@@ -59,7 +59,7 @@ public class SshExecuteAdkTool {
      * @return 包含 command / output / success / suggestion 的结构化结果
      */
     public Map<String, Object> executeCommand(
-            @Annotations.Schema(name = "command", description = "要执行的 Shell 命令，如: ls -la, apt install docker.io, docker --version", optional = true)
+            @Annotations.Schema(name = "command", description = "要执行的 Shell 命令，如: ls -la, apt install docker.io, docker --version")
             String command) {
         String connectionId = currentConnectionId;
 
@@ -78,8 +78,8 @@ public class SshExecuteAdkTool {
         if (command == null || command.isEmpty()) {
             log.warn("[executeCommand] 未提供命令");
             Map<String, Object> r = new HashMap<>();
-            r.put("success", true);
-            r.put("output", "好的，请告诉我需要执行什么命令？比如 ls -la、df -h 等。");
+            r.put("success", false);
+            r.put("output", "参数错误：未提供要执行的命令。请明确指定具体的 Shell 命令。");
             r.put("command", "");
             return r;
         }
