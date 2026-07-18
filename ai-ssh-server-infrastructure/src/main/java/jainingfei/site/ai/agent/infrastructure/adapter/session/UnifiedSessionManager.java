@@ -276,7 +276,11 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
          * 不和用户输入互斥——SSH shell 的 stdin 本身会排队处理。
          */
         public String executeCommand(String command) {
-            // 清空旧数据，准备捕获本次命令输出
+            // 双重清除：先清空，短暂等待后再次清空，防止上一轮命令的残余输出泄漏
+            synchronized (outputBuffer) {
+                outputBuffer.setLength(0);
+            }
+            try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             synchronized (outputBuffer) {
                 outputBuffer.setLength(0);
             }
