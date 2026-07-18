@@ -252,15 +252,17 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         session.readerThread = thread;
     }
 
-    /** 检查输出末尾是否包含 shell prompt */
+    /** 检查输出是否已完成：最后一行末尾包含 shell prompt，且至少有 2 行（命令回显也含 prompt，需排除） */
     private static boolean containsPrompt(String output) {
         if (output == null || output.isEmpty()) return false;
-        String tail = output.length() > 80 ? output.substring(output.length() - 80) : output;
+        // 至少需要 2 行：回显行 + 输出/空行，否则仅回显行的 prompt 会被误判
+        String[] lines = output.split("\\r?\\n");
+        if (lines.length < 2) return false;
+        String lastLine = lines[lines.length - 1].trim();
         for (String marker : PROMPT_MARKERS) {
-            if (tail.contains(marker)) return true;
+            if (lastLine.contains(marker)) return true;
         }
-        // 也匹配 user@host:dir$ 格式
-        return tail.matches("(?s).*@.*:[^\\n]*[$#]\\s*$");
+        return lastLine.matches(".*@.*:[^\\n]*[$#]\\s*$");
     }
 
     /** 清理输出：去掉 ANSI 码、命令回显、末尾 prompt */
