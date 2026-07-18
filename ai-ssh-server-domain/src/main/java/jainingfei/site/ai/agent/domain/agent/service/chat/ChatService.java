@@ -195,6 +195,14 @@ public class ChatService implements IChatService {
                     if (content != null && !content.isEmpty()) {
                         responseCapture.append(content);
                     }
+                    var fcs = event.functionCalls();
+                    if (!fcs.isEmpty()) {
+                        for (var fc : fcs) {
+                            log.warn("[CHAT_RAW] functionCall: name={} args={} final={} partial={}",
+                                    fc.name().orElse("?"), fc.args().orElse(null),
+                                    event.finalResponse(), event.partial().orElse(false));
+                        }
+                    }
                 })
                 .doOnComplete(() -> {
                     appendToHistory(effectiveSessionId, message, responseCapture.toString());
