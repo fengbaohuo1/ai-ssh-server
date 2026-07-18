@@ -70,11 +70,11 @@ public class SshExecuteAdkTool {
             String command) {
         String connectionId = currentConnectionId;
 
-        log.info("[executeCommand] thread={} connectionId={} command={}",
+        log.info("[EXEC] 进入 executeCommand: thread={} connectionId={} command='{}'",
                 Thread.currentThread().getName(), connectionId, command);
 
         if (connectionId == null || connectionId.isEmpty()) {
-            log.warn("[executeCommand] 未绑定 SSH 连接");
+            log.warn("[EXEC] 未绑定 SSH 连接 → 返回提示");
             Map<String, Object> r = new HashMap<>();
             r.put("success", true);
             r.put("output", "未绑定 SSH 终端会话。请先选择一台已连接的服务器。");
@@ -84,13 +84,13 @@ public class SshExecuteAdkTool {
 
         if (command == null || command.isEmpty()) {
             int count = emptyCallCounters
-                    .computeIfAbsent(connectionId != null ? connectionId : "no-connection", k -> new AtomicInteger(0))
+                    .computeIfAbsent(connectionId, k -> new AtomicInteger(0))
                     .incrementAndGet();
-            log.warn("[executeCommand] 未提供命令 (连续第{}次)", count);
+            log.warn("[EXEC] 空命令 (连续第{}次)", count);
 
             if (count >= MAX_EMPTY_CALLS) {
-                log.warn("[executeCommand] 连续{}次空命令，强制中断", count);
-                emptyCallCounters.remove(connectionId != null ? connectionId : "no-connection");
+                log.warn("[EXEC] 连续{}次空命令 → 强制中断", count);
+                emptyCallCounters.remove(connectionId);
                 Map<String, Object> r = new HashMap<>();
                 r.put("success", true);
                 r.put("command", "");
@@ -105,21 +105,23 @@ public class SshExecuteAdkTool {
             return r;
         }
 
-        if (!sshTerminalService.sessionExists(connectionId)) {
-            log.warn("[executeCommand] 终端会话不存在: {}", connectionId);
-            return Map.of(
-                    "success", false,
-                    "output", "SSH 终端会话不存在或已关闭: " + connectionId,
-                    "command", command
-            );
-        }
+        // 收到有效命令，重置空调用计数器
+        emptyCallCounters.remove(connectionId);
 
         try {
-            // 收到有效命令，重置空调用计数器
-            emptyCallCounters.remove(connectionId);
-            log.info("SSH 执行命令: connectionId={} command={}", connectionId, command);
+            // sessionExists 也可能抛异常，包在 try 里
+            if (!sshTerminalService.sessionExists(connectionId)) {
+                log.warn("[EXEC] 终端会话不存在: {}", connectionId);
+                Map<String, Object> r = new HashMap<>();
+                r.put("success", false);
+                r.put("command", command);
+                r.put("output", "SSH 终端会话不存在或已关闭: " + connectionId);
+                return r;
+            }
+
+            log.info("[EXEC] 开始SSH执行: connectionId={} command={}", connectionId, command);
             String output = sshTerminalService.executeCommand(connectionId, command);
-            log.info("SSH 命令执行完成: outputLength={}", output.length());
+            log.info("[EXEC] SSH执行完成: outputLength={}", output.length());
 
             boolean success = isExecutionSuccessful(output);
 
@@ -132,14 +134,15 @@ public class SshExecuteAdkTool {
                 result.put("suggestion", analyzeError(output));
             }
 
+            log.info("[EXEC] 返回结果: success={}", success);
             return result;
 
         } catch (Exception e) {
-            log.error("SSH 命令执行异常: connectionId={} command={}", connectionId, command, e);
+            log.error("[EXEC] 异常: connectionId={} command={}", connectionId, command, e);
             Map<String, Object> r = new HashMap<>();
             r.put("success", false);
-            r.put("output", "命令执行异常: " + e.getMessage());
             r.put("command", command != null ? command : "");
+            r.put("output", "命令执行异常: " + e.getMessage());
             return r;
         }
     }
