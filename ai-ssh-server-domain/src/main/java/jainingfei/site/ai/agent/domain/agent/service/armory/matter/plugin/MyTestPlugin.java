@@ -53,10 +53,22 @@ public class MyTestPlugin extends BasePlugin {
     public Maybe<LlmResponse> afterModelCallback(CallbackContext callbackContext, LlmResponse llmResponse) {
         llmResponse.content().ifPresent(content ->
             content.parts().ifPresent(parts -> {
+                int fcCount = 0, textCount = 0;
                 for (var part : parts) {
-                    part.functionCall().ifPresent(fc ->
-                        log.warn("[PLUGIN_AFTER_MODEL] RAW functionCall: name={} args={}",
-                                fc.name().orElse("?"), fc.args().orElse(null)));
+                    if (part.functionCall().isPresent()) {
+                        fcCount++;
+                        var fc = part.functionCall().get();
+                        log.warn("[PLUGIN_AFTER_MODEL] FC #{}/{}: name={} args={}",
+                                fcCount, parts.size(), fc.name().orElse("?"), fc.args().orElse(null));
+                    } else if (part.text().isPresent()) {
+                        textCount++;
+                    }
+                }
+                if (fcCount > 0 || textCount > 0) {
+                    log.warn("[PLUGIN_AFTER_MODEL] Response summary: {} parts total ({} FC, {} text) partial={} turnComplete={}",
+                            parts.size(), fcCount, textCount,
+                            llmResponse.partial().orElse(false),
+                            llmResponse.turnComplete().orElse(false));
                 }
             }));
         return super.afterModelCallback(callbackContext, llmResponse);
