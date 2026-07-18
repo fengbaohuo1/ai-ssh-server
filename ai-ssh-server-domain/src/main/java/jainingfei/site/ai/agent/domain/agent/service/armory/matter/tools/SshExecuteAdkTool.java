@@ -59,7 +59,7 @@ public class SshExecuteAdkTool {
      * @return 包含 command / output / success / suggestion 的结构化结果
      */
     public Map<String, Object> executeCommand(
-            @Annotations.Schema(name = "command", description = "要执行的 Shell 命令，如: ls -la, apt install docker.io, docker --version")
+            @Annotations.Schema(name = "command", description = "要执行的 Shell 命令，如: ls -la, apt install docker.io, docker --version", optional = true)
             String command) {
         String connectionId = currentConnectionId;
 
@@ -71,6 +71,15 @@ public class SshExecuteAdkTool {
             return Map.of(
                     "success", false,
                     "output", "未绑定 SSH 终端会话。请先选择一台已连接的服务器。",
+                    "command", command
+            );
+        }
+
+        if (command == null || command.isEmpty()) {
+            log.warn("[executeCommand] 未提供命令");
+            return Map.of(
+                    "success", false,
+                    "output", "未提供要执行的命令。请明确指定需要执行的 Shell 命令。",
                     "command", command
             );
         }
