@@ -201,9 +201,9 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             listeners.remove(listener);
         }
 
-        /** 写入用户输入（AI 操作期间自动丢弃，防止命令交错） */
+        /** 写入用户输入（AI 正在操作时自动丢弃，防止命令交错） */
         public void writeUserInput(String data) {
-            if (aiOperating || writeLock.isLocked()) {
+            if (aiOperating) {
                 return;
             }
             try {
