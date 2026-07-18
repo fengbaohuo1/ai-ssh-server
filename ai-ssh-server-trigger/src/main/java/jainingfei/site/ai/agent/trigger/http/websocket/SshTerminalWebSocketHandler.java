@@ -71,6 +71,7 @@ public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
 
         try {
             var session = sessionManager.getSession(connectionId);
+            log.debug("WS输入 connectionId={} data='{}'", connectionId, message.getPayload());
             session.writeUserInput(message.getPayload());
         } catch (IllegalArgumentException e) {
             log.warn("终端会话不存在 wsSessionId={}", wsSession.getId());

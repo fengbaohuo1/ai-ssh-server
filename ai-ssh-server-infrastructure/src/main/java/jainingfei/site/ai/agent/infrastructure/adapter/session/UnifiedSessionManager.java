@@ -196,8 +196,13 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         /** 写入用户输入 */
         public void writeUserInput(String data) {
             try {
-                channel.getOutputStream().write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                channel.getOutputStream().flush();
+                var os = channel.getOutputStream();
+                if (os == null) {
+                    log.warn("OutputStream 为 null connectionId={}", connectionId);
+                    return;
+                }
+                os.write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                os.flush();
             } catch (IOException e) {
                 log.warn("写入用户输入失败 connectionId={}", connectionId, e);
             }
