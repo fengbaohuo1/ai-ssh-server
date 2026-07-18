@@ -63,8 +63,8 @@ public class MyTestPlugin extends BasePlugin {
                     } else if (part.toolCall().isPresent()) {
                         tcCount++;
                         var tc = part.toolCall().get();
-                        log.warn("[PLUGIN_AFTER_MODEL] ToolCall #{}/{}: name={} args={}",
-                                tcCount, parts.size(), tc.name().orElse("?"), tc.args().orElse(null));
+                        log.warn("[PLUGIN_AFTER_MODEL] ToolCall #{}/{}: id={} type={} args={}",
+                                tcCount, parts.size(), tc.id().orElse("?"), tc.toolType().map(Object::toString).orElse("?"), tc.args().orElse(null));
                     } else if (part.text().isPresent()) {
                         textCount++;
                         var t = part.text().get();
