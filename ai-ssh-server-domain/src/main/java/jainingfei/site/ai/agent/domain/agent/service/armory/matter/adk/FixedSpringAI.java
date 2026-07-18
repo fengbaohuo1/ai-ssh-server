@@ -24,6 +24,8 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import reactor.core.publisher.Flux;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +37,8 @@ import java.util.Map;
  * 导致工具执行结果无法回填对话，DeepSeek API 返回 400。
  */
 public class FixedSpringAI extends BaseLlm {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final ChatModel chatModel;
     private final StreamingChatModel streamingChatModel;
@@ -153,7 +157,9 @@ public class FixedSpringAI extends BaseLlm {
                         fc.id().orElse(""),
                         "function",
                         fc.name().orElse(""),
-                        fc.args().map(Object::toString).orElse("{}")));
+                        fc.args().map(args -> {
+                            try { return MAPPER.writeValueAsString(args); } catch (Exception e) { return "{}"; }
+                        }).orElse("{}")));
             }
         }
 
@@ -178,8 +184,7 @@ public class FixedSpringAI extends BaseLlm {
             if ("function".equals(tc.type())) {
                 try {
                     @SuppressWarnings("unchecked")
-                    Map<String, Object> args = new com.fasterxml.jackson.databind.ObjectMapper()
-                            .readValue(tc.arguments(), Map.class);
+                    Map<String, Object> args = MAPPER.readValue(tc.arguments(), Map.class);
                     parts.add(Part.builder().functionCall(
                             FunctionCall.builder().id(tc.id()).name(tc.name()).args(args).build()).build());
                 } catch (Exception ignored) {}
