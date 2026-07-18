@@ -140,12 +140,14 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                     var len = in.read(buf);
                     if (len > 0) {
                         var chunk = new String(buf, 0, len);
-                        // AI 读缓冲区（后面通过 executeCommand 的 marker 机制消费）
+                        // AI 读缓冲区（后面通过 executeCommand 的 marker 机制消费，需要完整数据）
                         synchronized (session.outputBuffer) {
                             session.outputBuffer.append(chunk);
                         }
-                        // WebSocket 实时推送
-                        session.notifyListeners(chunk);
+                        // WebSocket 实时推送（过滤 marker 命令回显）
+                        if (!chunk.contains("__AI_END__")) {
+                            session.notifyListeners(chunk);
+                        }
                     } else if (len < 0) {
                         break;
                     }
