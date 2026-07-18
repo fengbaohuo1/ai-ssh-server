@@ -173,8 +173,10 @@ public class AgentServiceController implements IAgentService {
         }
     }
 
+    private static final java.util.regex.Pattern TOOL_CALLS_TAG = java.util.regex.Pattern.compile("</?tool_calls>");
+
     private String eventText(Event e) {
-        return e.content().flatMap(c -> c.parts()).map(ps -> ps.stream().filter(p -> p.text().isPresent()).map(p -> p.text().get()).reduce("", String::concat)).orElse("");
+        return e.content().flatMap(c -> c.parts()).map(ps -> ps.stream().filter(p -> p.text().isPresent()).map(p -> p.text().get()).reduce("", String::concat)).map(t -> TOOL_CALLS_TAG.matcher(t).replaceAll("")).orElse("");
     }
 
     private String parseStep(String s) {
