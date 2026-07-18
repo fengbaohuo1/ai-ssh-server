@@ -122,11 +122,13 @@ public class AgentServiceController implements IAgentService {
         try {
             String step = buildStep(event);
             String text = eventText(event);
-            if (step != null && text != null && !text.isEmpty())
+            // 跳过纯空白文本碎块（LLM 流式产生的 \n\n 独立 Token）
+            boolean hasContent = text != null && !text.trim().isEmpty();
+            if (step != null && hasContent)
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + ",\"s\":[" + step + "]}"));
             else if (step != null)
                 emitter.send(SseEmitter.event().data("{\"v\":\"\",\"s\":" + step + "}"));
-            else if (text != null && !text.isEmpty())
+            else if (hasContent)
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + "}"));
         } catch (Exception ignored) {}
     }

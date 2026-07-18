@@ -15,6 +15,8 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.AiAgentAuto
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
+import jainingfei.site.ai.agent.domain.ssh.model.aggregate.SshConnectionAggregate;
+import jainingfei.site.ai.agent.domain.ssh.service.ISshConnectionService;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
 import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
@@ -46,6 +48,8 @@ public class ChatService implements IChatService {
     private DefaultArmoryFactory defaultArmoryFactory;
     @Resource
     private AiAgentAutoConfigProperties aiAgentAutoConfigProperties;
+    @Resource
+    private ISshConnectionService sshConnectionService;
 
     @Override
     public List<AiAgentConfigTableVO.Agent> queryAiAgentConfigList() {
@@ -103,7 +107,7 @@ public class ChatService implements IChatService {
         sessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
         // 将对话历史嵌入当前消息文本，确保 LLM 看到完整上下文
-        String contextualizedMessage = buildContextualizedMessage(sessionId, message);
+        String contextualizedMessage = buildContextualizedMessage(sessionId, message, "");
         Content userMsg = Content.fromParts(Part.fromText(contextualizedMessage));
         Flowable<Event> events = runner.runAsync(userId, sessionId, userMsg,
                 RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
@@ -128,7 +132,8 @@ public class ChatService implements IChatService {
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
         // 将对话历史嵌入当前消息文本，确保 LLM 看到完整上下文
-        String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message);
+        // 这个重载不带 terminalSessionId，所以服务器上下文为空
+        String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message, "");
 
         // 捕获流式响应文本，用于完成后追加历史
         StringBuilder responseCapture = new StringBuilder();
@@ -158,13 +163,27 @@ public class ChatService implements IChatService {
 
         // 将 SSH 连接 ID 设置到静态字段，供 SshExecuteAdkTool 在 ADK 线程中读取
         // terminalSessionId 字段携带的是 connectionId（统一终端会话后，以 connectionId 为 key）
+        String serverContext = "";
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
             log.info("设置 SSH 连接 ID: {}", terminalSessionId);
             SshExecuteAdkTool.setCurrentTerminalSession(terminalSessionId);
+            // 查询服务器信息，注入到 LLM 上下文，让它知道连了哪台机器
+            try {
+                SshConnectionAggregate aggregate = sshConnectionService.queryConnectionDetail(terminalSessionId);
+                if (aggregate != null && aggregate.getConnection() != null) {
+                    var conn = aggregate.getConnection();
+                    serverContext = String.format(
+                            "\n<server_context>\n当前连接的服务器: %s@%s:%d\n服务器名称: %s\n</server_context>\n\n",
+                            conn.getUsername(), conn.getHost(), conn.getPort(), conn.getConnectionName());
+                    log.info("已注入服务器上下文: {}", serverContext.trim());
+                }
+            } catch (Exception e) {
+                log.warn("获取服务器信息失败 connectionId={}", terminalSessionId, e);
+            }
         }
 
-        // 将对话历史嵌入当前消息文本
-        String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message);
+        // 将对话历史和服务器上下文嵌入当前消息文本
+        String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message, serverContext);
 
         // 捕获流式响应文本，用于完成后追加历史
         StringBuilder responseCapture = new StringBuilder();
@@ -248,23 +267,28 @@ public class ChatService implements IChatService {
     }
 
     /**
-     * 将对话历史以文本格式嵌入当前消息，使 LLM 感知完整上下文。
-     * 无历史时返回原始消息不变。
+     * 将对话历史和服务器上下文以文本格式嵌入当前消息，使 LLM 感知完整上下文。
      */
-    private String buildContextualizedMessage(String sessionId, String currentMessage) {
-        Deque<Exchange> history = conversationHistories.get(sessionId);
-        if (history == null || history.isEmpty()) {
-            log.info("对话上下文 sessionId:{} 无历史记录", sessionId);
-            return currentMessage;
-        }
-        log.info("对话上下文 sessionId:{} 注入 {} 轮历史", sessionId, history.size());
+    private String buildContextualizedMessage(String sessionId, String currentMessage, String serverContext) {
         StringBuilder sb = new StringBuilder();
-        sb.append("<conversation_history>\n");
-        for (Exchange exchange : history) {
-            sb.append("user: ").append(exchange.userMessage()).append("\n");
-            sb.append("assistant: ").append(exchange.assistantMessage()).append("\n");
+
+        // 服务器上下文（有连接时）
+        if (serverContext != null && !serverContext.isEmpty()) {
+            sb.append(serverContext);
         }
-        sb.append("</conversation_history>\n\n");
+
+        // 对话历史
+        Deque<Exchange> history = conversationHistories.get(sessionId);
+        if (history != null && !history.isEmpty()) {
+            log.info("对话上下文 sessionId:{} 注入 {} 轮历史", sessionId, history.size());
+            sb.append("<conversation_history>\n");
+            for (Exchange exchange : history) {
+                sb.append("user: ").append(exchange.userMessage()).append("\n");
+                sb.append("assistant: ").append(exchange.assistantMessage()).append("\n");
+            }
+            sb.append("</conversation_history>\n\n");
+        }
+
         sb.append(currentMessage);
         return sb.toString();
     }
