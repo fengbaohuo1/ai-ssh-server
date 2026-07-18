@@ -48,10 +48,12 @@ public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
 
         log.info("WebSocket 终端连接 connectionId={} wsSessionId={}", connectionId, wsSession.getId());
 
-        // 获取或创建统一终端会话
-        UnifiedTerminalSession session;
+        wsToConnection.put(wsSession.getId(), connectionId);
+
+        // 获取或创建统一终端会话（传入监听器确保 MOTD 也能收到）
+        var listener = new ListenerHolder(wsSession);
         try {
-            session = sessionManager.getOrCreate(connectionId, 80, 24);
+            sessionManager.getOrCreate(connectionId, 80, 24, listener);
         } catch (Exception e) {
             log.error("获取终端会话失败 connectionId={}", connectionId, e);
             sendMessage(wsSession, "[31mSSH 会话不存在或已断开，请先连接服务器[0m\r\n");
@@ -59,11 +61,6 @@ public class SshTerminalWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        wsToConnection.put(wsSession.getId(), connectionId);
-
-        // 注册监听器：终端输出 → WebSocket
-        var listener = new ListenerHolder(wsSession);
-        session.addListener(listener);
         wsToListener.put(wsSession.getId(), listener);
     }
 

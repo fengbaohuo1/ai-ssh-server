@@ -44,10 +44,11 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     // ==================== WebSocket Handler 使用 ====================
 
     /**
-     * 获取或创建终端会话。WebSocket 连接建立时调用。
-     * 首次创建时会自动开 ChannelShell、启动后台读取线程、清除 MOTD。
+     * 获取或创建终端会话，并注册初始监听器（WebSocket 用）。
+     * 监听器在读取线程启动前注册，确保推送包括 MOTD 在内的所有输出。
      */
-    public UnifiedTerminalSession getOrCreate(String connectionId, int cols, int rows) {
+    public UnifiedTerminalSession getOrCreate(String connectionId, int cols, int rows,
+                                              Consumer<String> initialListener) {
         return sessions.computeIfAbsent(connectionId, id -> {
             log.info("创建终端会话 connectionId={}", id);
             var jschSession = sshSessionPort.getSession(id);
@@ -65,8 +66,12 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 var listeners = new CopyOnWriteArrayList<Consumer<String>>();
 
                 var session = new UnifiedTerminalSession(id, channel, writer, buffer, listeners);
+
+                // 先注册监听器，再启动读取线程——这样 MOTD 才能推送到前端
+                if (initialListener != null) {
+                    session.addListener(initialListener);
+                }
                 startReader(session);
-                clearMotd(session);
 
                 log.info("终端会话创建成功 connectionId={}", id);
                 return session;
@@ -75,6 +80,13 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 throw new RuntimeException("创建终端会话失败: " + id, e);
             }
         });
+    }
+
+    /**
+     * 获取或创建终端会话（不带初始监听器，AI 工具调用时使用）。
+     */
+    public UnifiedTerminalSession getOrCreate(String connectionId, int cols, int rows) {
+        return getOrCreate(connectionId, cols, rows, null);
     }
 
     /** 获取已存在的会话（不会自动创建） */
@@ -147,19 +159,6 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         thread.setDaemon(true);
         thread.start();
         session.readerThread = thread;
-    }
-
-    /** 等待 MOTD 到达后清空，防止混入 AI 命令输出 */
-    private void clearMotd(UnifiedTerminalSession session) {
-        try {
-            Thread.sleep(1500);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        synchronized (session.outputBuffer) {
-            log.info("终端 MOTD 已清空, bufferLength={}", session.outputBuffer.length());
-            session.outputBuffer.setLength(0);
-        }
     }
 
     // ===================================================================

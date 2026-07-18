@@ -50,7 +50,7 @@ public class SshConnectionService implements ISshConnectionService {
 
     @Override
     public boolean connect(String connectionId) {
-        log.info("建立SSH连接 connectionId={}", connectionId);
+        log.debug("建立SSH连接 connectionId={}", connectionId);
 
         // 1. 查询连接信息
         SshConnectionEntity connection = sshConnectionRepository.queryByConnectionId(connectionId).getConnection();
