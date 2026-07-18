@@ -56,8 +56,8 @@ public class FixedSpringAI extends BaseLlm {
             if (stream && streamingChatModel != null) {
                 return Flowable.fromPublisher(
                         streamingChatModel.stream(prompt)
-                                .map(this::toLlmResponse)
-                                .filter(r -> r != null));
+                                .filter(this::isNotEmpty)
+                                .map(this::toLlmResponse));
             }
             ChatResponse resp = chatModel.call(prompt);
             return Flowable.just(toLlmResponse(resp));
@@ -173,9 +173,18 @@ public class FixedSpringAI extends BaseLlm {
 
     // ===== ChatResponse → LlmResponse =====
 
+    /** 过滤 Spring AI 流式空 chunk——没有文本也没有工具调用的事件不传给 ADK */
+    private boolean isNotEmpty(ChatResponse cr) {
+        if (cr == null || cr.getResults().isEmpty()) return false;
+        AssistantMessage am = cr.getResult().getOutput();
+        boolean hasText = am.getText() != null && !am.getText().isEmpty();
+        boolean hasTools = !am.getToolCalls().isEmpty();
+        return hasText || hasTools;
+    }
+
     private LlmResponse toLlmResponse(ChatResponse cr) {
         if (cr == null || cr.getResults().isEmpty()) {
-            return null;
+            return LlmResponse.builder().build();
         }
         AssistantMessage am = cr.getResult().getOutput();
         List<Part> parts = new ArrayList<>();
@@ -192,8 +201,6 @@ public class FixedSpringAI extends BaseLlm {
                 } catch (Exception ignored) {}
             }
         }
-        // 跳过空消息——Spring AI 流式中常产生纯空 chunk，没有文本也没有工具调用
-        if (parts.isEmpty()) return null;
         return LlmResponse.builder()
                 .content(Content.builder().role("model").parts(parts).build())
                 .build();
