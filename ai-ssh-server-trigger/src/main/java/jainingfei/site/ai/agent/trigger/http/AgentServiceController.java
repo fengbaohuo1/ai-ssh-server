@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -34,6 +35,9 @@ import java.util.stream.Collectors;
 public class AgentServiceController implements IAgentService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** 每路 SSE 连接挂起的空白文本（附到下一个非空白事件前），流结束时清理 */
+    private final Map<SseEmitter, StringBuilder> pendingWs = new ConcurrentHashMap<>();
 
     @Resource
     private IChatService chatService;
@@ -114,8 +118,8 @@ public class AgentServiceController implements IAgentService {
                             dto.getTerminalSessionId())
                     .subscribe(
                             event -> sendSse(emitter, event),
-                            error -> emitter.completeWithError(error),
-                            () -> emitter.complete());
+                            error -> { pendingWs.remove(emitter); emitter.completeWithError(error); },
+                            () -> { pendingWs.remove(emitter); emitter.complete(); });
         } catch (Exception e) { emitter.completeWithError(e); }
         return emitter;
     }
@@ -125,10 +129,16 @@ public class AgentServiceController implements IAgentService {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // 跳过独立的纯空白事件（ADK artifact 或 LLM streaming 中的空白 token），
-            // 真正的段落分隔 \n\n 总是在有效文本事件中一起到达，不会独立成事件
+            // 纯空白文本 → 缓冲，附到下一个非空白事件前
             if (step == null && text != null && text.trim().isEmpty()) {
+                pendingWs.computeIfAbsent(emitter, k -> new StringBuilder()).append(text);
                 return;
+            }
+
+            // 有实际内容的文本 → 取出缓冲附在前面
+            if (text != null && !text.isEmpty()) {
+                StringBuilder buf = pendingWs.remove(emitter);
+                if (buf != null) text = buf + text;
             }
 
             if (step != null && text != null && !text.isEmpty())
