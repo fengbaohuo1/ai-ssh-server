@@ -129,9 +129,9 @@ public class AgentServiceController implements IAgentService {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // 纯空白文本 → 缓冲，附到下一个非空白事件前
+            // 纯空白文本 → 只保留最后一段（ADK 工具调用期间会密集产生 \n\n artifact）
             if (step == null && text != null && text.trim().isEmpty()) {
-                pendingWs.computeIfAbsent(emitter, k -> new StringBuilder()).append(text);
+                pendingWs.put(emitter, new StringBuilder(text));
                 return;
             }
 
