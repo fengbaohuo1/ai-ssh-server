@@ -273,31 +273,35 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
 
         String[] lines = s.split("\n");
         var result = new java.util.ArrayList<String>();
+        int echoEndIdx = findEchoEnd(lines, command); // 命令回显可能因 PTY 换行跨多行
 
         for (int i = 0; i < lines.length; i++) {
-            String line = lines[i];
-            String t = line.trim();
-
-            // 空行跳过
+            String t = lines[i].trim();
             if (t.isEmpty()) continue;
-
-            // 第一行：如果是命令回显，跳过
-            if (result.isEmpty() && isEchoLine(t, command)) continue;
-
-            // 最后一行：如果是 prompt，跳过
-            if (i == lines.length - 1 && isPromptLine(t)) continue;
-
-            result.add(line);
+            if (i <= echoEndIdx) continue;                        // 跳过回显行
+            if (i == lines.length - 1 && isPromptLine(t)) continue; // 跳过末尾 prompt
+            result.add(lines[i]);
         }
 
         return String.join("\n", result).trim();
     }
 
-    private static boolean isEchoLine(String line, String command) {
-        String cmd = command.trim();
-        if (line.equals(cmd)) return true;
-        if (cmd.length() > 10 && line.contains(cmd)) return true;
-        return false;
+    /** 找到命令回显的结束行索引。PTY 换行使长命令跨多行。 */
+    private static int findEchoEnd(String[] lines, String command) {
+        if (command == null || command.isEmpty()) return -1;
+        // 去所有空白后比较——PTY 换行会凭空插入空格，不能按词匹配
+        String cmdCompact = command.replaceAll("\\s+", "");
+        StringBuilder accumulated = new StringBuilder();
+
+        for (int i = 0; i < lines.length; i++) {
+            String t = lines[i].trim();
+            if (t.isEmpty()) continue;
+            accumulated.append(t);
+            String accCompact = accumulated.toString().replaceAll("\\s+", "");
+            if (accCompact.startsWith(cmdCompact)) return i;
+            if (accCompact.length() > cmdCompact.length() + 20) break;
+        }
+        return -1;
     }
 
     private static boolean isPromptLine(String line) {
