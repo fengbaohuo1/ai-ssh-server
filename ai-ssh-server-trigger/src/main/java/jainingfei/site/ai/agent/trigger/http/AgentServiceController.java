@@ -129,7 +129,21 @@ public class AgentServiceController implements IAgentService {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // 空白文本：缓冲到下一个非空白事件前（避免独立 \n\n 打断 Markdown）
+            // [DIAG] \n\n 事件特征追踪
+            if (step == null && text != null && text.contains("\n")) {
+                String raw = event.stringifyContent();
+                log.warn("[DIAG] \\n event: text='{}' raw='{}' id={} final={} partial={} calls={} resps={} thread={}",
+                        text.replace("\n", "\\n").replace("\r", "\\r"),
+                        raw != null ? raw.replace("\n", "\\n").replace("\r", "\\r") : "null",
+                        event.id(),
+                        event.finalResponse(),
+                        event.partial().orElse(false),
+                        event.functionCalls().size(),
+                        event.functionResponses().size(),
+                        Thread.currentThread().getName());
+            }
+
+            // 空白文本：缓冲到下一个非空白事件前
             if (step == null && text != null && text.trim().isEmpty()) {
                 pendingText.computeIfAbsent(emitter, k -> new StringBuilder()).append(text);
                 return;
