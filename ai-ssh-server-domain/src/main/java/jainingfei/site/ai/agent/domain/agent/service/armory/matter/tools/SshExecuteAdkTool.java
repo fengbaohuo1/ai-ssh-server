@@ -120,7 +120,7 @@ public class SshExecuteAdkTool {
             }
 
             log.info("[EXEC] 开始SSH执行: connectionId={} command={}", connectionId, command);
-            String output = sshTerminalService.executeCommand(connectionId, command);
+            String output = sshTerminalService.execCommand(connectionId, command);
             log.info("[EXEC] SSH执行完成: outputLength={}", output.length());
 
             boolean success = isExecutionSuccessful(output);

@@ -11,13 +11,19 @@ public interface ISshTerminalService {
 
     /**
      * 在指定连接的终端中执行命令并返回输出。
-     * 终端会话不存在时会自动创建。
+     * ChannelShell 方式，命令之间有状态延续。
      *
      * @param connectionId 已连接的 SSH 连接 ID
      * @param command      要执行的 Shell 命令
      * @return 命令输出文本
      */
     String executeCommand(String connectionId, String command);
+
+    /**
+     * 独立通道执行命令——ChannelExec，每次新通道，返回纯净 stdout。
+     * AI 工具专用，无回显/ANSI/prompt/状态污染。
+     */
+    String execCommand(String connectionId, String command);
 
     /**
      * 检查终端会话是否存在且活跃

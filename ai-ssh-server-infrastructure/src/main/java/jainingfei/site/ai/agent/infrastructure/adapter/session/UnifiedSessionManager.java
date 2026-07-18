@@ -1,5 +1,6 @@
 package jainingfei.site.ai.agent.infrastructure.adapter.session;
 
+import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.ChannelShell;
 import com.jcraft.jsch.JSchException;
 import jakarta.annotation.Resource;
@@ -8,6 +9,7 @@ import jainingfei.site.ai.agent.domain.ssh.adapter.port.ITerminalSessionPort;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -190,6 +192,58 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         } finally {
             // 5. 切回正常模式
             aiMode.put(connectionId, false);
+        }
+    }
+
+    /**
+     * ChannelExec 独立通道执行命令——无回显、无 ANSI、无 prompt，返回纯净 stdout。
+     * AI 工具专用。每次新建 ChannelExec，执行完即关闭，不共享状态。
+     */
+    @Override
+    public String execCommand(String connectionId, String command) {
+        var jschSession = sshSessionPort.getSession(connectionId);
+        if (jschSession == null || !jschSession.isConnected()) {
+            throw new IllegalStateException("SSH 连接未建立: " + connectionId);
+        }
+
+        // 如果 TerminalSession 存在，通知 WebSocket（终端能看到 AI 操作）
+        var session = sessions.get(connectionId);
+        if (session != null && !session.isClosed()) {
+            session.notifyListeners("\r\n[33m🤖 " + command + "[0m\r\n");
+        }
+
+        ChannelExec channel = null;
+        try {
+            channel = (ChannelExec) jschSession.openChannel("exec");
+            channel.setCommand(command);
+            channel.setInputStream(null);
+            channel.setErrStream(System.err, true);
+
+            var out = new ByteArrayOutputStream();
+            channel.setOutputStream(out);
+            channel.connect(10_000);
+
+            // 等待执行完成
+            while (!channel.isClosed()) {
+                try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+
+            String result = out.toString(StandardCharsets.UTF_8);
+
+            if (session != null && !session.isClosed()) {
+                session.notifyListeners(result);
+            }
+
+            log.debug("[EXEC] connectionId={} command={} outputLen={}", connectionId, command, result.length());
+            return result.trim();
+
+        } catch (Exception e) {
+            log.error("[EXEC] 执行失败 connectionId={} command={}", connectionId, command, e);
+            throw new RuntimeException("AI 命令执行失败: " + e.getMessage(), e);
+        } finally {
+            if (channel != null) {
+                channel.disconnect();
+            }
         }
     }
 

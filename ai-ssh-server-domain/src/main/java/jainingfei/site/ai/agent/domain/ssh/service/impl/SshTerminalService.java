@@ -26,6 +26,12 @@ public class SshTerminalService implements ISshTerminalService {
     }
 
     @Override
+    public String execCommand(String connectionId, String command) {
+        log.debug("AI 执行命令 connectionId={} command={}", connectionId, command);
+        return terminalSessionPort.execCommand(connectionId, command);
+    }
+
+    @Override
     public boolean sessionExists(String connectionId) {
         return terminalSessionPort.sessionExists(connectionId);
     }
