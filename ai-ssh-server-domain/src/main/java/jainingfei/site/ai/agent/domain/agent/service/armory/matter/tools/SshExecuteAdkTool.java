@@ -8,6 +8,8 @@ import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * SSH 命令执行 ADK 工具 — 为智能体提供在 SSH 终端执行命令的能力。
@@ -30,6 +32,11 @@ public class SshExecuteAdkTool {
 
     /** 当前绑定的 SSH 连接 ID（静态字段，ADK 线程池中仍可访问） */
     private static String currentConnectionId;
+
+    /** 连续空命令调用计数器，防止劣质 LLM 死循环 */
+    private static final ConcurrentHashMap<String, AtomicInteger> emptyCallCounters = new ConcurrentHashMap<>();
+    /** 连续空命令上限，超过则强制中断 */
+    private static final int MAX_EMPTY_CALLS = 3;
 
     @Resource
     private ISshTerminalService sshTerminalService;
@@ -76,11 +83,25 @@ public class SshExecuteAdkTool {
         }
 
         if (command == null || command.isEmpty()) {
-            log.warn("[executeCommand] 未提供命令");
+            int count = emptyCallCounters
+                    .computeIfAbsent(connectionId != null ? connectionId : "no-connection", k -> new AtomicInteger(0))
+                    .incrementAndGet();
+            log.warn("[executeCommand] 未提供命令 (连续第{}次)", count);
+
+            if (count >= MAX_EMPTY_CALLS) {
+                log.warn("[executeCommand] 连续{}次空命令，强制中断", count);
+                emptyCallCounters.remove(connectionId != null ? connectionId : "no-connection");
+                Map<String, Object> r = new HashMap<>();
+                r.put("success", true);
+                r.put("command", "");
+                r.put("output", "已中断重复调用。请直接用文字向用户说明当前情况，不要再调用 executeCommand。");
+                return r;
+            }
+
             Map<String, Object> r = new HashMap<>();
             r.put("success", false);
-            r.put("output", "参数错误：未提供要执行的命令。请明确指定具体的 Shell 命令。");
             r.put("command", "");
+            r.put("output", "参数缺失：executeCommand 必须提供 command 参数。示例：command=\"ls -la\"");
             return r;
         }
 
@@ -94,6 +115,8 @@ public class SshExecuteAdkTool {
         }
 
         try {
+            // 收到有效命令，重置空调用计数器
+            emptyCallCounters.remove(connectionId);
             log.info("SSH 执行命令: connectionId={} command={}", connectionId, command);
             String output = sshTerminalService.executeCommand(connectionId, command);
             log.info("SSH 命令执行完成: outputLength={}", output.length());
