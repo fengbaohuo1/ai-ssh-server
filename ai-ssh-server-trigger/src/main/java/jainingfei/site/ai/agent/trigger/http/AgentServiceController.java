@@ -125,17 +125,10 @@ public class AgentServiceController implements IAgentService {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // [DEBUG] 追踪纯空白文本事件（如 \n\n）
-            if (text != null && !text.isEmpty() && text.trim().isEmpty()) {
-                String raw = event.stringifyContent();
-                log.warn("[SSE_DBG] whitespace text: escaped='{}' raw='{}' final={} partial={} err={} calls={} resps={}",
-                        text.replace("\n", "\\n").replace("\r", "\\r"),
-                        raw != null ? raw.replace("\n", "\\n").replace("\r", "\\r") : "null",
-                        event.finalResponse(),
-                        event.partial().orElse(false),
-                        event.errorCode().isPresent(),
-                        event.functionCalls().size(),
-                        event.functionResponses().size());
+            // 跳过纯空白文本事件（如 DeepSeek 流中独立的 \n\n token）
+            if (step == null && text != null && text.trim().isEmpty()) {
+                log.trace("[SSE] skip whitespace-only text event");
+                return;
             }
 
             if (step != null && text != null && !text.isEmpty())
