@@ -118,24 +118,30 @@ public class AgentServiceController implements IAgentService {
                             dto.getTerminalSessionId())
                     .subscribe(
                             event -> sendSse(emitter, event),
-                            error -> { pendingWs.remove(emitter); emitter.completeWithError(error); },
-                            () -> { pendingWs.remove(emitter); emitter.complete(); });
+                            error -> { pendingWs.remove(emitter); lastWasStep.remove(emitter); emitter.completeWithError(error); },
+                            () -> { pendingWs.remove(emitter); lastWasStep.remove(emitter); emitter.complete(); });
         } catch (Exception e) { emitter.completeWithError(e); }
         return emitter;
     }
+
+    /** 上一发出去的事件是否为步骤（用于判断是否需要保留空白作段落分隔） */
+    private final Map<SseEmitter, Boolean> lastWasStep = new ConcurrentHashMap<>();
 
     private void sendSse(SseEmitter emitter, Event event) {
         try {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // 纯空白文本 → 只保留最后一段（ADK 工具调用期间会密集产生 \n\n artifact）
+            // 纯空白文本 → 只在步骤事件后保留（作为 LLM 新段落的开头分隔），
+            // 连续文本间的空白则是 ADK artifact，直接丢弃
             if (step == null && text != null && text.trim().isEmpty()) {
-                pendingWs.put(emitter, new StringBuilder(text));
+                if (Boolean.TRUE.equals(lastWasStep.get(emitter))) {
+                    pendingWs.put(emitter, new StringBuilder(text));
+                }
                 return;
             }
 
-            // 有实际内容的文本 → 取出缓冲附在前面
+            // 有实际内容的文本 → 取出缓冲附在前面（如果有的话）
             if (text != null && !text.isEmpty()) {
                 StringBuilder buf = pendingWs.remove(emitter);
                 if (buf != null) text = buf + text;
@@ -147,6 +153,9 @@ public class AgentServiceController implements IAgentService {
                 emitter.send(SseEmitter.event().data("{\"v\":\"\",\"s\":" + step + "}"));
             else if (text != null && !text.isEmpty())
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + "}"));
+
+            // 记录此次是否为步骤事件
+            lastWasStep.put(emitter, step != null);
         } catch (Exception ignored) {}
     }
 
