@@ -69,18 +69,18 @@ public class SshExecuteAdkTool {
         if (connectionId == null || connectionId.isEmpty()) {
             log.warn("[executeCommand] 未绑定 SSH 连接");
             Map<String, Object> r = new HashMap<>();
-            r.put("success", false);
+            r.put("success", true);
             r.put("output", "未绑定 SSH 终端会话。请先选择一台已连接的服务器。");
-            r.put("command", command);
+            r.put("command", command != null ? command : "");
             return r;
         }
 
         if (command == null || command.isEmpty()) {
             log.warn("[executeCommand] 未提供命令");
             Map<String, Object> r = new HashMap<>();
-            r.put("success", false);
-            r.put("output", "未提供要执行的命令。请明确指定需要执行的 Shell 命令。");
-            r.put("command", command);
+            r.put("success", true);
+            r.put("output", "好的，请告诉我需要执行什么命令？比如 ls -la、df -h 等。");
+            r.put("command", "");
             return r;
         }
 
@@ -116,7 +116,7 @@ public class SshExecuteAdkTool {
             Map<String, Object> r = new HashMap<>();
             r.put("success", false);
             r.put("output", "命令执行异常: " + e.getMessage());
-            r.put("command", command);
+            r.put("command", command != null ? command : "");
             return r;
         }
     }
