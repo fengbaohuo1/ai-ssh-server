@@ -10,8 +10,6 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -63,16 +61,15 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 channel.setPtySize(cols, rows, cols * 8, rows * 16);
                 channel.connect(10000);
 
-                var writer = new PrintWriter(new OutputStreamWriter(channel.getOutputStream()));
                 var buffer = new StringBuilder();
                 var listeners = new CopyOnWriteArrayList<Consumer<String>>();
 
-                var s = new UnifiedTerminalSession(id, channel, writer, buffer, listeners);
+                var s = new UnifiedTerminalSession(id, channel, buffer, listeners);
                 startReader(s);
                 log.info("终端会话创建成功 connectionId={}", id);
                 return s;
 
-            } catch (JSchException | IOException e) {
+            } catch (JSchException e) {
                 throw new RuntimeException("创建终端会话失败: " + id, e);
             }
         });
@@ -171,17 +168,15 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     public static class UnifiedTerminalSession {
         private final String connectionId;
         private final ChannelShell channel;
-        private final PrintWriter writer;
         private final StringBuilder outputBuffer;
         private final List<Consumer<String>> listeners;
         private volatile boolean closed;
         private Thread readerThread;
 
-        UnifiedTerminalSession(String connectionId, ChannelShell channel, PrintWriter writer,
+        UnifiedTerminalSession(String connectionId, ChannelShell channel,
                                StringBuilder outputBuffer, List<Consumer<String>> listeners) {
             this.connectionId = connectionId;
             this.channel = channel;
-            this.writer = writer;
             this.outputBuffer = outputBuffer;
             this.listeners = listeners;
         }
@@ -198,12 +193,12 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             listeners.remove(listener);
         }
 
-        /** 写入用户输入（不与 AI 互斥，shell stdin 本身会排队处理） */
+        /** 写入用户输入 */
         public void writeUserInput(String data) {
             try {
-                writer.print(data);
-                writer.flush();
-            } catch (Exception e) {
+                channel.getOutputStream().write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                channel.getOutputStream().flush();
+            } catch (IOException e) {
                 log.warn("写入用户输入失败 connectionId={}", connectionId, e);
             }
         }
@@ -214,7 +209,6 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
          * AI 执行命令：写命令 → 写唯一 marker → 轮询等待 marker 出现 → 返回输出。
          * <p>
          * 不和用户输入互斥——SSH shell 的 stdin 本身会排队处理。
-         * Marker 标记 {@code __AI_END__<random>__} 极低概率被用户误打。
          */
         public String executeCommand(String command) {
             notifyListeners("\r\n[33m■ AI 正在操作: " + command + "[0m\r\n");
@@ -228,16 +222,17 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             var marker = "__AI_END__" + UUID.randomUUID().toString().substring(0, 8) + "__";
 
             try {
+                var os = channel.getOutputStream();
                 // 写命令
-                writer.print(command + "\n");
-                writer.flush();
+                os.write((command + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                os.flush();
 
                 // 等输出开始到达
                 Thread.sleep(300);
 
                 // 写 marker
-                writer.print("echo \"" + marker + "\"\n");
-                writer.flush();
+                os.write(("echo \"" + marker + "\"\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                os.flush();
 
                 // 轮询等待 marker
                 var deadline = System.currentTimeMillis() + 30_000;
@@ -259,6 +254,8 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("AI 命令执行被中断");
+            } catch (IOException e) {
+                throw new RuntimeException("AI 命令写入失败: " + command, e);
             } finally {
                 notifyListeners("\r\n[32m■ AI 操作完成[0m\r\n");
             }
@@ -274,10 +271,6 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             closed = true;
             if (readerThread != null) {
                 readerThread.interrupt();
-            }
-            try {
-                writer.close();
-            } catch (Exception ignored) {
             }
             if (channel != null && channel.isConnected()) {
                 channel.disconnect();
