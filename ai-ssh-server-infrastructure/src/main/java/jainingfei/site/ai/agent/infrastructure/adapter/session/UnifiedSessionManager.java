@@ -44,6 +44,12 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     /** connectionId → 是否处于 AI 命令执行模式 */
     private final ConcurrentHashMap<String, Boolean> aiMode = new ConcurrentHashMap<>();
 
+    /** connectionId → 上一次执行的命令缓存（防 LLM 重复执行） */
+    private final ConcurrentHashMap<String, CachedResult> commandCache = new ConcurrentHashMap<>();
+
+    private record CachedResult(String command, String output, long timestamp) {}
+    private static final long CACHE_TTL_MS = 3_000; // 3 秒内同一命令不重复执行
+
     /** Shell prompt 检测标记 */
     private static final String[] PROMPT_MARKERS = {"$ ", "# ", "% "};
 
@@ -100,6 +106,14 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     // ==================== AI 工具使用 ====================
 
     public String executeCommand(String connectionId, String command) {
+        // 去重：3 秒内重复执行同一命令直接返回缓存结果，阻止 LLM 循环
+        var cached = commandCache.get(connectionId);
+        if (cached != null && cached.command.equals(command)
+                && System.currentTimeMillis() - cached.timestamp < CACHE_TTL_MS) {
+            log.info("[AI] 跳过重复命令: {}", command);
+            return cached.output;
+        }
+
         var session = getOrCreate(connectionId, 120, 24);
         var aiBuffer = aiBuffers.get(connectionId);
         if (aiBuffer == null) {
@@ -167,7 +181,9 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 aiBuffer.setLength(0);
             }
 
-            return cleanOutput(result, command);
+            result = cleanOutput(result, command);
+            commandCache.put(connectionId, new CachedResult(command, result, System.currentTimeMillis()));
+            return result;
 
         } catch (IOException e) {
             throw new RuntimeException("AI 命令写入失败: " + command, e);
