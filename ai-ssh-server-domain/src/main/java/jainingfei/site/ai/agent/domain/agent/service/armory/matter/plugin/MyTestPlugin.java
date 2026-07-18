@@ -3,6 +3,7 @@ package jainingfei.site.ai.agent.domain.agent.service.armory.matter.plugin;
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.CallbackContext;
 import com.google.adk.agents.InvocationContext;
+import com.google.adk.events.Event;
 import com.google.adk.models.LlmRequest;
 import com.google.adk.models.LlmResponse;
 import com.google.adk.plugins.BasePlugin;
@@ -43,6 +44,17 @@ public class MyTestPlugin extends BasePlugin {
         Optional<String> model = llmRequest.build().model();
         log.info("ai 模型:{}", model.orElse(""));
         return super.beforeModelCallback(callbackContext, llmRequest);
+    }
+
+    @Override
+    public Maybe<Event> onEventCallback(InvocationContext invocationContext, Event event) {
+        var fcs = event.functionCalls();
+        if (!fcs.isEmpty()) {
+            for (var fc : fcs) {
+                log.warn("[PLUGIN_EVT] functionCall: name={} args={}", fc.name().orElse("?"), fc.args().orElse(null));
+            }
+        }
+        return super.onEventCallback(invocationContext, event);
     }
 
 }
