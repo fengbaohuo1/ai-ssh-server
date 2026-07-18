@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 /**
@@ -175,8 +174,6 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         private final PrintWriter writer;
         private final StringBuilder outputBuffer;
         private final List<Consumer<String>> listeners;
-        private final ReentrantLock writeLock = new ReentrantLock();
-        private volatile boolean aiOperating;
         private volatile boolean closed;
         private Thread readerThread;
 
@@ -201,11 +198,8 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             listeners.remove(listener);
         }
 
-        /** 写入用户输入（AI 正在操作时自动丢弃，防止命令交错） */
+        /** 写入用户输入（不与 AI 互斥，shell stdin 本身会排队处理） */
         public void writeUserInput(String data) {
-            if (aiOperating) {
-                return;
-            }
             try {
                 writer.print(data);
                 writer.flush();
@@ -219,22 +213,21 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         /**
          * AI 执行命令：写命令 → 写唯一 marker → 轮询等待 marker 出现 → 返回输出。
          * <p>
-         * 整个操作持有 {@link #writeLock}，阻止用户同时输入。
+         * 不和用户输入互斥——SSH shell 的 stdin 本身会排队处理。
+         * Marker 标记 {@code __AI_END__<random>__} 极低概率被用户误打。
          */
         public String executeCommand(String command) {
-            writeLock.lock();
+            notifyListeners("\r\n[33m■ AI 正在操作: " + command + "[0m\r\n");
+
+            // 清空旧数据，准备捕获本次命令输出
+            synchronized (outputBuffer) {
+                outputBuffer.setLength(0);
+            }
+
+            // 生成唯一 marker（随机后缀防止误匹配）
+            var marker = "__AI_END__" + UUID.randomUUID().toString().substring(0, 8) + "__";
+
             try {
-                aiOperating = true;
-                notifyListeners("\r\n[33m■ AI 正在操作: " + command + "[0m\r\n");
-
-                // 清空旧数据，准备捕获本次命令输出
-                synchronized (outputBuffer) {
-                    outputBuffer.setLength(0);
-                }
-
-                // 生成唯一 marker（随机后缀防止误匹配）
-                var marker = "__AI_END__" + UUID.randomUUID().toString().substring(0, 8) + "__";
-
                 // 写命令
                 writer.print(command + "\n");
                 writer.flush();
@@ -267,9 +260,7 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("AI 命令执行被中断");
             } finally {
-                aiOperating = false;
                 notifyListeners("\r\n[32m■ AI 操作完成[0m\r\n");
-                writeLock.unlock();
             }
         }
 
