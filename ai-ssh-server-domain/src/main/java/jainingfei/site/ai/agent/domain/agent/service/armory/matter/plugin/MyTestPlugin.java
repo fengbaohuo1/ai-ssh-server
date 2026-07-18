@@ -50,6 +50,19 @@ public class MyTestPlugin extends BasePlugin {
     }
 
     @Override
+    public Maybe<LlmResponse> afterModelCallback(CallbackContext callbackContext, LlmResponse llmResponse) {
+        llmResponse.content().ifPresent(content ->
+            content.parts().ifPresent(parts -> {
+                for (var part : parts) {
+                    part.functionCall().ifPresent(fc ->
+                        log.warn("[PLUGIN_AFTER_MODEL] RAW functionCall: name={} args={}",
+                                fc.name().orElse("?"), fc.args().orElse(null)));
+                }
+            }));
+        return super.afterModelCallback(callbackContext, llmResponse);
+    }
+
+    @Override
     public Maybe<Event> onEventCallback(InvocationContext invocationContext, Event event) {
         var fcs = event.functionCalls();
         if (!fcs.isEmpty()) {
