@@ -55,7 +55,9 @@ public class FixedSpringAI extends BaseLlm {
             Prompt prompt = toPrompt(req);
             if (stream && streamingChatModel != null) {
                 return Flowable.fromPublisher(
-                        streamingChatModel.stream(prompt).map(this::toLlmResponse));
+                        streamingChatModel.stream(prompt)
+                                .map(this::toLlmResponse)
+                                .filter(r -> r != null));
             }
             ChatResponse resp = chatModel.call(prompt);
             return Flowable.just(toLlmResponse(resp));
@@ -173,7 +175,7 @@ public class FixedSpringAI extends BaseLlm {
 
     private LlmResponse toLlmResponse(ChatResponse cr) {
         if (cr == null || cr.getResults().isEmpty()) {
-            return LlmResponse.builder().build();
+            return null;
         }
         AssistantMessage am = cr.getResult().getOutput();
         List<Part> parts = new ArrayList<>();
@@ -190,6 +192,8 @@ public class FixedSpringAI extends BaseLlm {
                 } catch (Exception ignored) {}
             }
         }
+        // 跳过空消息——Spring AI 流式中常产生纯空 chunk，没有文本也没有工具调用
+        if (parts.isEmpty()) return null;
         return LlmResponse.builder()
                 .content(Content.builder().role("model").parts(parts).build())
                 .build();
