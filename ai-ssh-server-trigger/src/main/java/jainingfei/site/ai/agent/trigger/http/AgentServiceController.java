@@ -125,8 +125,11 @@ public class AgentServiceController implements IAgentService {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // 跳过纯空白文本事件（ADK Runner 内部产生的 artifact，非 LLM 输出）
-            if (step == null && text != null && text.trim().isEmpty()) {
+            // 只跳过 ADK Runner 内部 artifact（final=true, partial=false 的纯空白事件），
+            // 保留 LLM 流式输出中的 \n\n（partial=true，是真正的段落分隔）
+            boolean isArtifact = step == null && text != null && text.trim().isEmpty()
+                    && event.finalResponse() && !event.partial().orElse(true);
+            if (isArtifact) {
                 return;
             }
 
