@@ -106,6 +106,9 @@ public class SshConnectionController implements ISshConnectionApiService {
         try {
             log.info("建立SSH连接 connectionId={}", connectionId);
 
+            // 先清理旧终端会话（ChannelShell 绑定的是旧 JSch Session，重连后就失效了）
+            unifiedSessionManager.closeSession(connectionId);
+
             boolean success = sshConnectionService.connect(connectionId);
 
             if (success) {
