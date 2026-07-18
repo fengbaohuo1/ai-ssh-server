@@ -25,24 +25,14 @@ import org.springframework.stereotype.Service;
 
 
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
 
 @Slf4j
 @Service
 public class ChatService implements IChatService {
     private final Map<String, String> userSessions = new ConcurrentHashMap<>();
-    /** sessionId → 对话历史（最近 N 轮），线程安全 */
-    private final Map<String, Deque<Exchange>> conversationHistories = new ConcurrentHashMap<>();
-    /** 每个会话最多保留的对话轮数 */
-    private static final int MAX_HISTORY_TURNS = 20;
-
-    /** 一轮对话交换：用户消息 + 助手回复 */
-    private record Exchange(String userMessage, String assistantMessage) {
-    }
 
     @Resource
     private DefaultArmoryFactory defaultArmoryFactory;
@@ -80,8 +70,6 @@ public class ChatService implements IChatService {
                     .blockingGet();
             return session.id();
         });
-        // 新 session 初始化空历史（computeIfAbsent 保证只执行一次）
-        conversationHistories.putIfAbsent(sessionId, new ConcurrentLinkedDeque<>());
         return sessionId;
     }
 
@@ -106,17 +94,11 @@ public class ChatService implements IChatService {
         InMemoryRunner runner = aiAgentRegisterVO.getRunner();
         sessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
-        // 将对话历史嵌入当前消息文本，确保 LLM 看到完整上下文
-        String contextualizedMessage = buildContextualizedMessage(sessionId, message, "");
-        Content userMsg = Content.fromParts(Part.fromText(contextualizedMessage));
+        Content userMsg = Content.fromParts(Part.fromText(message));
         Flowable<Event> events = runner.runAsync(userId, sessionId, userMsg,
                 RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
         List<String> outputs = new ArrayList<>();
         events.blockingForEach(event -> outputs.add(event.stringifyContent()));
-
-        // 本轮对话完成后，追加到历史
-        String assistantResponse = String.join("\n", outputs);
-        appendToHistory(sessionId, message, assistantResponse);
 
         return outputs;
     }
@@ -131,24 +113,10 @@ public class ChatService implements IChatService {
         InMemoryRunner runner = aiAgentRegisterVO.getRunner();
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
-        // 将对话历史嵌入当前消息文本，确保 LLM 看到完整上下文
-        // 这个重载不带 terminalSessionId，所以服务器上下文为空
-        String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message, "");
-
-        // 捕获流式响应文本，用于完成后追加历史
-        StringBuilder responseCapture = new StringBuilder();
-        Content userMsg = Content.fromParts(Part.fromText(contextualizedMessage));
+        // ADK 的 InMemorySessionService 自动管理对话历史
+        Content userMsg = Content.fromParts(Part.fromText(message));
         return runner.runAsync(userId, effectiveSessionId, userMsg,
-                        RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build())
-                .doOnNext(event -> {
-                    String content = event.stringifyContent();
-                    if (content != null && !content.isEmpty()) {
-                        responseCapture.append(content);
-                    }
-                })
-                .doOnComplete(() -> {
-                    appendToHistory(effectiveSessionId, message, responseCapture.toString());
-                });
+                RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
     }
 
     @Override
@@ -182,23 +150,12 @@ public class ChatService implements IChatService {
             }
         }
 
-        // 将对话历史和服务器上下文嵌入当前消息文本
-        String contextualizedMessage = buildContextualizedMessage(effectiveSessionId, message, serverContext);
-
-        // 捕获流式响应文本，用于完成后追加历史
-        StringBuilder responseCapture = new StringBuilder();
+        // ADK 的 InMemorySessionService 自动管理对话历史，不需要手动嵌入
+        // 只在首次连接时注入服务器上下文
+        String contextualizedMessage = serverContext.isEmpty() ? message : serverContext + message;
         Content userMsg = Content.fromParts(Part.fromText(contextualizedMessage));
         return runner.runAsync(userId, effectiveSessionId, userMsg,
-                        RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build())
-                .doOnNext(event -> {
-                    String content = event.stringifyContent();
-                    if (content != null && !content.isEmpty()) {
-                        responseCapture.append(content);
-                    }
-                })
-                .doOnComplete(() -> {
-                    appendToHistory(effectiveSessionId, message, responseCapture.toString());
-                });
+                RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
     }
 
     @Override
@@ -260,54 +217,6 @@ public class ChatService implements IChatService {
 
     @Override
     public void clearHistory(String sessionId) {
-        Deque<Exchange> removed = conversationHistories.remove(sessionId);
-        if (removed != null) {
-            log.info("已清理会话历史 sessionId:{} turns:{}", sessionId, removed.size());
-        }
-    }
-
-    /**
-     * 将对话历史和服务器上下文以文本格式嵌入当前消息，使 LLM 感知完整上下文。
-     */
-    private String buildContextualizedMessage(String sessionId, String currentMessage, String serverContext) {
-        StringBuilder sb = new StringBuilder();
-
-        // 服务器上下文（有连接时）
-        if (serverContext != null && !serverContext.isEmpty()) {
-            sb.append(serverContext);
-        }
-
-        // 对话历史
-        Deque<Exchange> history = conversationHistories.get(sessionId);
-        if (history != null && !history.isEmpty()) {
-            log.info("对话上下文 sessionId:{} 注入 {} 轮历史", sessionId, history.size());
-            sb.append("<conversation_history>\n");
-            for (Exchange exchange : history) {
-                sb.append("user: ").append(exchange.userMessage()).append("\n");
-                sb.append("assistant: ").append(exchange.assistantMessage()).append("\n");
-            }
-            sb.append("</conversation_history>\n\n");
-        }
-
-        sb.append(currentMessage);
-        return sb.toString();
-    }
-
-    /**
-     * 追加一轮对话到历史，超出上限时移除最旧的记录。
-     */
-    private void appendToHistory(String sessionId, String userMessage, String assistantMessage) {
-        Deque<Exchange> history = conversationHistories.computeIfAbsent(sessionId,
-                k -> new ConcurrentLinkedDeque<>());
-        synchronized (history) {
-            while (history.size() >= MAX_HISTORY_TURNS) {
-                history.pollFirst();
-            }
-            history.addLast(new Exchange(userMessage, assistantMessage));
-        }
-        log.info("对话历史追加 sessionId:{} userMsg:{} asstMsg:{} total:{}",
-                sessionId, userMessage.substring(0, Math.min(50, userMessage.length())),
-                assistantMessage.substring(0, Math.min(50, assistantMessage.length())),
-                history.size());
+        // ADK InMemorySessionService 管理历史，无需手动清理
     }
 }
