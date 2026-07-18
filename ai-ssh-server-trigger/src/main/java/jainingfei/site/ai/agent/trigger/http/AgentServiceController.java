@@ -20,7 +20,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -35,9 +34,6 @@ import java.util.stream.Collectors;
 public class AgentServiceController implements IAgentService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    /** 每路 SSE 连接的挂起空白文本缓冲（附到下一个非空白事件前） */
-    private final Map<SseEmitter, StringBuilder> pendingText = new ConcurrentHashMap<>();
 
     @Resource
     private IChatService chatService;
@@ -118,8 +114,8 @@ public class AgentServiceController implements IAgentService {
                             dto.getTerminalSessionId())
                     .subscribe(
                             event -> sendSse(emitter, event),
-                            error -> { pendingText.remove(emitter); emitter.completeWithError(error); },
-                            () -> { pendingText.remove(emitter); emitter.complete(); });
+                            error -> emitter.completeWithError(error),
+                            () -> emitter.complete());
         } catch (Exception e) { emitter.completeWithError(e); }
         return emitter;
     }
@@ -129,32 +125,9 @@ public class AgentServiceController implements IAgentService {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // [DIAG] \n\n 事件特征追踪
-            if (step == null && text != null && text.contains("\n")) {
-                String raw = event.stringifyContent();
-                log.warn("[DIAG] \\n event: text='{}' raw='{}' id={} final={} partial={} calls={} resps={} thread={}",
-                        text.replace("\n", "\\n").replace("\r", "\\r"),
-                        raw != null ? raw.replace("\n", "\\n").replace("\r", "\\r") : "null",
-                        event.id(),
-                        event.finalResponse(),
-                        event.partial().orElse(false),
-                        event.functionCalls().size(),
-                        event.functionResponses().size(),
-                        Thread.currentThread().getName());
-            }
-
-            // 空白文本：缓冲到下一个非空白事件前
+            // 跳过纯空白文本事件（ADK Runner 内部产生的 artifact，非 LLM 输出）
             if (step == null && text != null && text.trim().isEmpty()) {
-                pendingText.computeIfAbsent(emitter, k -> new StringBuilder()).append(text);
                 return;
-            }
-
-            // 有实际内容：从缓冲取出空白文本附在前面
-            if (text != null && !text.isEmpty()) {
-                StringBuilder buf = pendingText.remove(emitter);
-                if (buf != null) {
-                    text = buf + text;
-                }
             }
 
             if (step != null && text != null && !text.isEmpty())

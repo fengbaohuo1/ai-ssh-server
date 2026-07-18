@@ -195,16 +195,6 @@ public class ChatService implements IChatService {
                     if (content != null && !content.isEmpty()) {
                         responseCapture.append(content);
                     }
-                    // [DIAG] 追踪 ADK Event 中包含 \n 的事件
-                    if (content != null && content.contains("\n")) {
-                        log.warn("[DIAG_CHAT] ADK Event contains newline: content='{}' final={} partial={} fc={} fr={} thread={}",
-                                content.replace("\n", "\\n").replace("\r", "\\r"),
-                                event.finalResponse(),
-                                event.partial().orElse(false),
-                                event.functionCalls().size(),
-                                event.functionResponses().size(),
-                                Thread.currentThread().getName());
-                    }
                 })
                 .doOnComplete(() -> {
                     appendToHistory(effectiveSessionId, message, responseCapture.toString());
