@@ -96,7 +96,7 @@ public class ChatService implements IChatService {
 
         Content userMsg = Content.fromParts(Part.fromText(message));
         Flowable<Event> events = runner.runAsync(userId, sessionId, userMsg,
-                RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
+                RunConfig.builder().streamingMode(RunConfig.StreamingMode.NONE).build());
         List<String> outputs = new ArrayList<>();
         events.blockingForEach(event -> outputs.add(event.stringifyContent()));
 
@@ -116,7 +116,7 @@ public class ChatService implements IChatService {
         // ADK 的 InMemorySessionService 自动管理对话历史
         Content userMsg = Content.fromParts(Part.fromText(message));
         return runner.runAsync(userId, effectiveSessionId, userMsg,
-                RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
+                RunConfig.builder().streamingMode(RunConfig.StreamingMode.NONE).build());
     }
 
     @Override
@@ -155,7 +155,7 @@ public class ChatService implements IChatService {
         String contextualizedMessage = serverContext.isEmpty() ? message : serverContext + message;
         Content userMsg = Content.fromParts(Part.fromText(contextualizedMessage));
         return runner.runAsync(userId, effectiveSessionId, userMsg,
-                RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
+                RunConfig.builder().streamingMode(RunConfig.StreamingMode.NONE).build());
     }
 
     @Override
@@ -193,7 +193,7 @@ public class ChatService implements IChatService {
 
         InMemoryRunner runner = aiAgentRegisterVO.getRunner();
         Flowable<Event> events = runner.runAsync(chatCommandEntity.getUserId(), sessionId, content,
-                RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
+                RunConfig.builder().streamingMode(RunConfig.StreamingMode.NONE).build());
         List<String> outputs = new ArrayList<>();
         events.blockingForEach(event -> outputs.add(event.stringifyContent()));
         return outputs;
