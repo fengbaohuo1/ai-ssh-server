@@ -53,20 +53,29 @@ public class MyTestPlugin extends BasePlugin {
     public Maybe<LlmResponse> afterModelCallback(CallbackContext callbackContext, LlmResponse llmResponse) {
         llmResponse.content().ifPresent(content ->
             content.parts().ifPresent(parts -> {
-                int fcCount = 0, textCount = 0;
+                int fcCount = 0, tcCount = 0, textCount = 0;
                 for (var part : parts) {
                     if (part.functionCall().isPresent()) {
                         fcCount++;
                         var fc = part.functionCall().get();
                         log.warn("[PLUGIN_AFTER_MODEL] FC #{}/{}: name={} args={}",
                                 fcCount, parts.size(), fc.name().orElse("?"), fc.args().orElse(null));
+                    } else if (part.toolCall().isPresent()) {
+                        tcCount++;
+                        var tc = part.toolCall().get();
+                        log.warn("[PLUGIN_AFTER_MODEL] ToolCall #{}/{}: name={} args={}",
+                                tcCount, parts.size(), tc.name().orElse("?"), tc.args().orElse(null));
                     } else if (part.text().isPresent()) {
                         textCount++;
+                        var t = part.text().get();
+                        if (tcCount == 0 && fcCount == 0) {
+                            log.info("[PLUGIN_AFTER_MODEL] Text: '{}'", t.length() > 80 ? t.substring(0, 80) + "..." : t);
+                        }
                     }
                 }
-                if (fcCount > 0 || textCount > 0) {
-                    log.warn("[PLUGIN_AFTER_MODEL] Response summary: {} parts total ({} FC, {} text) partial={} turnComplete={}",
-                            parts.size(), fcCount, textCount,
+                if (fcCount > 0 || tcCount > 0) {
+                    log.warn("[PLUGIN_AFTER_MODEL] Summary: {} parts ({} FC, {} TC, {} text) partial={} turnComplete={}",
+                            parts.size(), fcCount, tcCount, textCount,
                             llmResponse.partial().orElse(false),
                             llmResponse.turnComplete().orElse(false));
                 }
