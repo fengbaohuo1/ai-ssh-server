@@ -118,30 +118,36 @@ public class AgentServiceController implements IAgentService {
                             dto.getTerminalSessionId())
                     .subscribe(
                             event -> sendSse(emitter, event),
-                            error -> { pendingWs.remove(emitter); lastWasStep.remove(emitter); emitter.completeWithError(error); },
-                            () -> { pendingWs.remove(emitter); lastWasStep.remove(emitter); emitter.complete(); });
+                            error -> { pendingWs.remove(emitter); lastWsTime.remove(emitter); emitter.completeWithError(error); },
+                            () -> { pendingWs.remove(emitter); lastWsTime.remove(emitter); emitter.complete(); });
         } catch (Exception e) { emitter.completeWithError(e); }
         return emitter;
     }
 
-    /** 上一发出去的事件是否为步骤（用于判断是否需要保留空白作段落分隔） */
-    private final Map<SseEmitter, Boolean> lastWasStep = new ConcurrentHashMap<>();
+    /** 上次缓冲空白的时间（用于去重 ADK artifact） */
+    private final Map<SseEmitter, Long> lastWsTime = new ConcurrentHashMap<>();
 
     private void sendSse(SseEmitter emitter, Event event) {
         try {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // 纯空白文本 → 只在步骤事件后保留（作为 LLM 新段落的开头分隔），
-            // 连续文本间的空白则是 ADK artifact，直接丢弃
+            // 纯空白文本：用时间间隔区分 LLM 段落分隔 vs ADK artifact
+            //   ADK artifact: 密集出现（间隔 < 300ms）→ 只保留一个
+            //   LLM 段落分隔: 稀疏出现 → 正常保留
             if (step == null && text != null && text.trim().isEmpty()) {
-                if (Boolean.TRUE.equals(lastWasStep.get(emitter))) {
-                    pendingWs.put(emitter, new StringBuilder(text));
+                long now = System.currentTimeMillis();
+                Long last = lastWsTime.get(emitter);
+                if (last != null && now - last < 300) {
+                    return; // ADK artifact，丢弃
                 }
+                // LLM 段落分隔或第一个 artifact，保留
+                lastWsTime.put(emitter, now);
+                pendingWs.put(emitter, new StringBuilder(text));
                 return;
             }
 
-            // 有实际内容的文本 → 取出缓冲附在前面（如果有的话）
+            // 有实际内容的文本 → 取出缓冲附在前面
             if (text != null && !text.isEmpty()) {
                 StringBuilder buf = pendingWs.remove(emitter);
                 if (buf != null) text = buf + text;
@@ -153,9 +159,6 @@ public class AgentServiceController implements IAgentService {
                 emitter.send(SseEmitter.event().data("{\"v\":\"\",\"s\":" + step + "}"));
             else if (text != null && !text.isEmpty())
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + "}"));
-
-            // 记录此次是否为步骤事件
-            lastWasStep.put(emitter, step != null);
         } catch (Exception ignored) {}
     }
 
