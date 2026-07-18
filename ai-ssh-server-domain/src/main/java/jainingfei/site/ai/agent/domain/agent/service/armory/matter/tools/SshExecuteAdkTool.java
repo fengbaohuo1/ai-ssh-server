@@ -70,7 +70,7 @@ public class SshExecuteAdkTool {
             String command) {
         String connectionId = currentConnectionId;
 
-        log.info("[EXEC] 进入 executeCommand: thread={} connectionId={} command='{}'",
+        log.debug("[EXEC] thread={} connectionId={} command='{}'",
                 Thread.currentThread().getName(), connectionId, command);
 
         if (connectionId == null || connectionId.isEmpty()) {

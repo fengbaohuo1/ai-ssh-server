@@ -3,7 +3,6 @@ package jainingfei.site.ai.agent.domain.agent.service.armory.matter.plugin;
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.CallbackContext;
 import com.google.adk.agents.InvocationContext;
-import com.google.adk.events.Event;
 import com.google.adk.models.LlmRequest;
 import com.google.adk.models.LlmResponse;
 import com.google.adk.plugins.BasePlugin;
@@ -47,51 +46,6 @@ public class MyTestPlugin extends BasePlugin {
         Optional<String> model = llmRequest.build().model();
         log.info("ai 模型:{}", model.orElse(""));
         return super.beforeModelCallback(callbackContext, llmRequest);
-    }
-
-    @Override
-    public Maybe<LlmResponse> afterModelCallback(CallbackContext callbackContext, LlmResponse llmResponse) {
-        llmResponse.content().ifPresent(content ->
-            content.parts().ifPresent(parts -> {
-                int fcCount = 0, tcCount = 0, textCount = 0;
-                for (var part : parts) {
-                    if (part.functionCall().isPresent()) {
-                        fcCount++;
-                        var fc = part.functionCall().get();
-                        log.warn("[PLUGIN_AFTER_MODEL] FC #{}/{}: name={} args={}",
-                                fcCount, parts.size(), fc.name().orElse("?"), fc.args().orElse(null));
-                    } else if (part.toolCall().isPresent()) {
-                        tcCount++;
-                        var tc = part.toolCall().get();
-                        log.warn("[PLUGIN_AFTER_MODEL] ToolCall #{}/{}: id={} type={} args={}",
-                                tcCount, parts.size(), tc.id().orElse("?"), tc.toolType().map(Object::toString).orElse("?"), tc.args().orElse(null));
-                    } else if (part.text().isPresent()) {
-                        textCount++;
-                        var t = part.text().get();
-                        if (tcCount == 0 && fcCount == 0) {
-                            log.info("[PLUGIN_AFTER_MODEL] Text: '{}'", t.length() > 80 ? t.substring(0, 80) + "..." : t);
-                        }
-                    }
-                }
-                if (fcCount > 0 || tcCount > 0) {
-                    log.warn("[PLUGIN_AFTER_MODEL] Summary: {} parts ({} FC, {} TC, {} text) partial={} turnComplete={}",
-                            parts.size(), fcCount, tcCount, textCount,
-                            llmResponse.partial().orElse(false),
-                            llmResponse.turnComplete().orElse(false));
-                }
-            }));
-        return super.afterModelCallback(callbackContext, llmResponse);
-    }
-
-    @Override
-    public Maybe<Event> onEventCallback(InvocationContext invocationContext, Event event) {
-        var fcs = event.functionCalls();
-        if (!fcs.isEmpty()) {
-            for (var fc : fcs) {
-                log.warn("[PLUGIN_EVT] functionCall: name={} args={}", fc.name().orElse("?"), fc.args().orElse(null));
-            }
-        }
-        return super.onEventCallback(invocationContext, event);
     }
 
     @Override
