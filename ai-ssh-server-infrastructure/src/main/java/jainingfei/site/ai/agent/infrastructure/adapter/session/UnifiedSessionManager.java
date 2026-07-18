@@ -46,10 +46,13 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     /**
      * 获取或创建终端会话，并注册初始监听器（WebSocket 用）。
      * 监听器在读取线程启动前注册，确保推送包括 MOTD 在内的所有输出。
+     * <p>
+     * 注意：因为 {@link ConcurrentHashMap#computeIfAbsent} 在 key 已存在时不执行 lambda，
+     * 所以返回现有会话后需要手动注册监听器。
      */
     public UnifiedTerminalSession getOrCreate(String connectionId, int cols, int rows,
                                               Consumer<String> initialListener) {
-        return sessions.computeIfAbsent(connectionId, id -> {
+        var session = sessions.computeIfAbsent(connectionId, id -> {
             log.info("创建终端会话 connectionId={}", id);
             var jschSession = sshSessionPort.getSession(id);
             if (jschSession == null || !jschSession.isConnected()) {
@@ -65,21 +68,22 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 var buffer = new StringBuilder();
                 var listeners = new CopyOnWriteArrayList<Consumer<String>>();
 
-                var session = new UnifiedTerminalSession(id, channel, writer, buffer, listeners);
-
-                // 先注册监听器，再启动读取线程——这样 MOTD 才能推送到前端
-                if (initialListener != null) {
-                    session.addListener(initialListener);
-                }
-                startReader(session);
-
+                var s = new UnifiedTerminalSession(id, channel, writer, buffer, listeners);
+                startReader(s);
                 log.info("终端会话创建成功 connectionId={}", id);
-                return session;
+                return s;
 
             } catch (JSchException | IOException e) {
                 throw new RuntimeException("创建终端会话失败: " + id, e);
             }
         });
+
+        // 无论是新建还是已有会话，监听器都要注册
+        // computeIfAbsent 在会话已存在时不会执行 lambda，所以在这里补注册
+        if (initialListener != null) {
+            session.addListener(initialListener);
+        }
+        return session;
     }
 
     /**
