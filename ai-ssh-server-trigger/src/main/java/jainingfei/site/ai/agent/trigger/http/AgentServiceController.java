@@ -17,7 +17,9 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -135,18 +137,24 @@ public class AgentServiceController implements IAgentService {
     private String buildStep(Event e) {
         var fcs = e.functionCalls(); var frs = e.functionResponses();
         if (fcs.isEmpty() && frs.isEmpty()) return null;
-        if (!fcs.isEmpty()) {
-            FunctionCall fc = fcs.get(0);
-            String args = fc.args().map(a -> {
-                try { return MAPPER.writeValueAsString(a); } catch (Exception ex) { return a.toString(); }
-            }).orElse("");
-            return "{\"t\":\"tool_call\",\"n\":\"" + esc(fc.name().orElse("")) + "\",\"a\":" + esc(trunc(args, 500)) + "}";
+        try {
+            Map<String, Object> step = new LinkedHashMap<>();
+            if (!fcs.isEmpty()) {
+                FunctionCall fc = fcs.get(0);
+                step.put("t", "tool_call");
+                step.put("n", fc.name().orElse(""));
+                fc.args().ifPresent(a -> step.put("a", a));
+            } else {
+                FunctionResponse fr = frs.get(0);
+                step.put("t", "tool_result");
+                step.put("n", fr.name().orElse(""));
+                fr.response().ifPresent(r -> step.put("r", r));
+            }
+            return MAPPER.writeValueAsString(step);
+        } catch (Exception ex) {
+            log.warn("buildStep 异常", ex);
+            return null;
         }
-        FunctionResponse fr = frs.get(0);
-        String resp = fr.response().map(r -> {
-            try { return MAPPER.writeValueAsString(r); } catch (Exception ex) { return r.toString(); }
-        }).orElse("");
-        return "{\"t\":\"tool_result\",\"n\":\"" + esc(fr.name().orElse("")) + "\",\"r\":" + esc(trunc(resp, 1000)) + "}";
     }
 
     private String eventText(Event e) {
