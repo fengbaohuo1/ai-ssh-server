@@ -189,21 +189,54 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     }
 
     /**
-     * 去除输出开头的命令回显。PTY 回显时会在终端宽度处插入 \r\n 换行，
-     * 所以不能用简单的 startsWith 比较，需要忽略空白差异来匹配。
+     * 去除输出开头的命令回显。双策略：
+     * 1. 精确匹配当前命令（忽略 PTY 换行带来的空白差异）
+     * 2. 兜底：如果输出开头行明显是 shell 命令回显（含 `|` `;` `||` `&&` 等），
+     *    直接切掉直到遇到第一个非命令行
      */
     private static String stripEchoedCommand(String output, String command) {
-        if (command == null || command.isEmpty()) return output;
-        // 归一化：把所有连续空白（空格、\r、\n）合并为单一空格
+        if (command == null || command.isEmpty() || output == null) return output;
+
+        // 1. 尝试精确匹配当前命令
+        String result = stripExactCommand(output, command);
+        if (!result.equals(output)) return result;
+
+        // 2. 兜底：切掉开头的 shell 命令回显行（含管道/分隔符）
+        //    上一轮命令的回显可能泄漏到这里，归一化匹配失败时需要此策略
+        String[] lines = output.split("\\r?\\n");
+        int skip = 0;
+        for (String line : lines) {
+            String t = line.trim();
+            if (t.isEmpty()) { skip++; continue; }
+            // 以常见命令开头，或包含 shell 管道/分隔符，视为回显行
+            if (t.matches("^(ls|find|cat|echo|ps|grep|file|md5sum|which|docker|systemctl|netstat|ss|ip|df|du|free|top|kill|chmod|chown|mkdir|rm|cp|mv|tail|head|wc|sort|uniq|cut|awk|sed|curl|wget|tar|gzip|unzip|apt|yum|pip|npm|python|node|java)\\b.*")
+                    || t.matches(".*[|;&].*")) {
+                skip++;
+            } else {
+                break; // 遇到非命令行，停止
+            }
+        }
+        if (skip > 0 && skip < lines.length) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = skip; i < lines.length; i++) {
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(lines[i]);
+            }
+            return sb.toString().trim();
+        }
+        return output;
+    }
+
+    /** 归一化空白后精确匹配并切除命令回显 */
+    private static String stripExactCommand(String output, String command) {
         String cmdNorm = command.replaceAll("\\s+", " ").trim();
         String outNorm = output.replaceAll("\\s+", " ").trim();
         if (!outNorm.startsWith(cmdNorm)) return output;
 
-        // 找到归一化命令在原始输出中的结束位置
         int cmdNormIdx = 0, origIdx = 0;
         while (cmdNormIdx < cmdNorm.length() && origIdx < output.length()) {
-            if (Character.isWhitespace(output.charAt(origIdx))) {
-                // 原始位置跳过空白，归一化位置跳到下一个非空白
+            char oc = output.charAt(origIdx);
+            if (Character.isWhitespace(oc)) {
                 origIdx++;
                 while (origIdx < output.length() && Character.isWhitespace(output.charAt(origIdx))) {
                     origIdx++;
@@ -211,7 +244,7 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 while (cmdNormIdx < cmdNorm.length() && cmdNorm.charAt(cmdNormIdx) == ' ') {
                     cmdNormIdx++;
                 }
-            } else if (output.charAt(origIdx) == cmdNorm.charAt(cmdNormIdx)) {
+            } else if (oc == cmdNorm.charAt(cmdNormIdx)) {
                 origIdx++;
                 cmdNormIdx++;
             } else {
@@ -276,11 +309,13 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
          * 不和用户输入互斥——SSH shell 的 stdin 本身会排队处理。
          */
         public String executeCommand(String command) {
-            // 双重清除：先清空，短暂等待后再次清空，防止上一轮命令的残余输出泄漏
+            // 双重清除：清空 → 等残余输出到达 → 再清空
+            // LLM 可能一次生成多个 function call，ADK 连续调用本方法，
+            // 上一个命令的 shell prompt 可能还在 SSH 通道中未到达
             synchronized (outputBuffer) {
                 outputBuffer.setLength(0);
             }
-            try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            try { Thread.sleep(200); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             synchronized (outputBuffer) {
                 outputBuffer.setLength(0);
             }
