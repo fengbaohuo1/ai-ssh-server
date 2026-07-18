@@ -20,7 +20,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -35,9 +34,6 @@ import java.util.stream.Collectors;
 public class AgentServiceController implements IAgentService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    /** 每路 SSE 连接挂起的空白文本（附到下一个非空白事件前），流结束时清理 */
-    private final Map<SseEmitter, StringBuilder> pendingWs = new ConcurrentHashMap<>();
 
     @Resource
     private IChatService chatService;
@@ -118,40 +114,16 @@ public class AgentServiceController implements IAgentService {
                             dto.getTerminalSessionId())
                     .subscribe(
                             event -> sendSse(emitter, event),
-                            error -> { pendingWs.remove(emitter); lastWsTime.remove(emitter); emitter.completeWithError(error); },
-                            () -> { pendingWs.remove(emitter); lastWsTime.remove(emitter); emitter.complete(); });
+                            error -> emitter.completeWithError(error),
+                            () -> emitter.complete());
         } catch (Exception e) { emitter.completeWithError(e); }
         return emitter;
     }
-
-    /** 上次缓冲空白的时间（用于去重 ADK artifact） */
-    private final Map<SseEmitter, Long> lastWsTime = new ConcurrentHashMap<>();
 
     private void sendSse(SseEmitter emitter, Event event) {
         try {
             String step = buildStep(event);
             String text = eventText(event);
-
-            // 纯空白文本：用时间间隔区分 LLM 段落分隔 vs ADK artifact
-            //   ADK artifact: 密集出现（间隔 < 300ms）→ 只保留一个
-            //   LLM 段落分隔: 稀疏出现 → 正常保留
-            if (step == null && text != null && text.trim().isEmpty()) {
-                long now = System.currentTimeMillis();
-                Long last = lastWsTime.get(emitter);
-                if (last != null && now - last < 300) {
-                    return; // ADK artifact，丢弃
-                }
-                // LLM 段落分隔或第一个 artifact，保留
-                lastWsTime.put(emitter, now);
-                pendingWs.put(emitter, new StringBuilder(text));
-                return;
-            }
-
-            // 有实际内容的文本 → 取出缓冲附在前面
-            if (text != null && !text.isEmpty()) {
-                StringBuilder buf = pendingWs.remove(emitter);
-                if (buf != null) text = buf + text;
-            }
 
             if (step != null && text != null && !text.isEmpty())
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + ",\"s\":[" + step + "]}"));
