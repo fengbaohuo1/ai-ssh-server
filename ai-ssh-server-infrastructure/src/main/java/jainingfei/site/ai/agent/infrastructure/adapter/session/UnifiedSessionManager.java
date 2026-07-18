@@ -240,8 +240,6 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
          * 不和用户输入互斥——SSH shell 的 stdin 本身会排队处理。
          */
         public String executeCommand(String command) {
-            notifyListeners("\r\n[33m■ AI 正在操作: " + command + "[0m\r\n");
-
             // 清空旧数据，准备捕获本次命令输出
             synchronized (outputBuffer) {
                 outputBuffer.setLength(0);
@@ -285,8 +283,6 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 throw new RuntimeException("AI 命令执行被中断");
             } catch (IOException e) {
                 throw new RuntimeException("AI 命令写入失败: " + command, e);
-            } finally {
-                notifyListeners("\r\n[32m■ AI 操作完成[0m\r\n");
             }
         }
 
