@@ -131,8 +131,8 @@ public class SshExecuteAdkTool {
 
         String lowerOutput = output.toLowerCase();
         String[] errorIndicators = {
-                "command not found", "no such file or directory", "permission denied",
-                "operation not permitted", "cannot find", "error:", "failed",
+                "command not found", "permission denied",
+                "operation not permitted", "error:", "failed",
                 "fatal:", "unable to", "connection refused", "network is unreachable"
         };
 
