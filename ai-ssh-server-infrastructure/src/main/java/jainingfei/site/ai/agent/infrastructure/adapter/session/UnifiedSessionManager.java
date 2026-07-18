@@ -106,7 +106,7 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         var session = sessions.remove(connectionId);
         if (session != null) {
             session.close();
-            log.info("终端会话已关闭 connectionId={}", connectionId);
+            log.debug("终端会话已关闭 connectionId={}", connectionId);
         }
     }
 

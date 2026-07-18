@@ -138,7 +138,7 @@ public class SshConnectionController implements ISshConnectionApiService {
     @Override
     public Response<Void> disconnect(@PathVariable String connectionId) {
         try {
-            log.info("断开SSH连接 connectionId={}", connectionId);
+            log.debug("断开SSH连接 connectionId={}", connectionId);
 
             sshConnectionService.disconnect(connectionId);
             // 清理统一终端会话（ChannelShell）

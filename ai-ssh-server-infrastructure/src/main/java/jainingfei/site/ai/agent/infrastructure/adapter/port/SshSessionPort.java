@@ -66,7 +66,7 @@ public class SshSessionPort implements ISshSessionPort {
         Session session = sessions.remove(connectionId);
         if (session != null && session.isConnected()) {
             session.disconnect();
-            log.info("SSH连接已断开 connectionId={}", connectionId);
+            log.debug("SSH连接已断开 connectionId={}", connectionId);
         }
     }
 
