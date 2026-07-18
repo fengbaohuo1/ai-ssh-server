@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -34,6 +35,9 @@ import java.util.stream.Collectors;
 public class AgentServiceController implements IAgentService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** 每路 SSE 连接的挂起空白文本缓冲（附到下一个非空白事件前） */
+    private final Map<SseEmitter, StringBuilder> pendingText = new ConcurrentHashMap<>();
 
     @Resource
     private IChatService chatService;
@@ -114,8 +118,8 @@ public class AgentServiceController implements IAgentService {
                             dto.getTerminalSessionId())
                     .subscribe(
                             event -> sendSse(emitter, event),
-                            error -> emitter.completeWithError(error),
-                            () -> emitter.complete());
+                            error -> { pendingText.remove(emitter); emitter.completeWithError(error); },
+                            () -> { pendingText.remove(emitter); emitter.complete(); });
         } catch (Exception e) { emitter.completeWithError(e); }
         return emitter;
     }
@@ -124,6 +128,20 @@ public class AgentServiceController implements IAgentService {
         try {
             String step = buildStep(event);
             String text = eventText(event);
+
+            // 空白文本：缓冲到下一个非空白事件前（避免独立 \n\n 打断 Markdown）
+            if (step == null && text != null && text.trim().isEmpty()) {
+                pendingText.computeIfAbsent(emitter, k -> new StringBuilder()).append(text);
+                return;
+            }
+
+            // 有实际内容：从缓冲取出空白文本附在前面
+            if (text != null && !text.isEmpty()) {
+                StringBuilder buf = pendingText.remove(emitter);
+                if (buf != null) {
+                    text = buf + text;
+                }
+            }
 
             if (step != null && text != null && !text.isEmpty())
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + ",\"s\":[" + step + "]}"));
