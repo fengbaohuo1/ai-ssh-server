@@ -10,6 +10,8 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,16 +20,13 @@ import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
- * 统一终端会话管理器 — 一个 {@code connectionId} 只维护一个 ChannelShell。
- * <p>
- * 合并 WebSocket 终端（人用）和 AI 工具（机器用）两条通路：
+ * 统一终端会话管理器 — 双缓冲 + prompt 检测。
  * <pre>
  * JSch Session
- *   └─ UnifiedTerminalSession (×1 per connectionId)
- *        ├─ WebSocket Handler: 实时推送监听器 + writeUserInput()
- *        └─ AI 工具: write() + marker 等待 + consume 读
+ *   └─ ChannelShell (×1 per connectionId)
+ *        ├─ reader 线程 → aiMode? → aiBuffer(notifyAll) + outputBuffer + listeners
+ *        └─ AI executeCommand: 写命令 → wait aiBuffer → 检测 prompt → 返回
  * </pre>
- * AI 写命令期间持有 {@link ReentrantLock}，用户输入被自动丢弃，防止命令交错。
  */
 @Slf4j
 @Component
@@ -39,15 +38,20 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     /** connectionId → 统一终端会话 */
     private final ConcurrentHashMap<String, UnifiedTerminalSession> sessions = new ConcurrentHashMap<>();
 
+    /** connectionId → AI 命令执行独立缓冲区 */
+    private final ConcurrentHashMap<String, StringBuilder> aiBuffers = new ConcurrentHashMap<>();
+
+    /** connectionId → 是否处于 AI 命令执行模式 */
+    private final ConcurrentHashMap<String, Boolean> aiMode = new ConcurrentHashMap<>();
+
+    /** Shell prompt 检测标记 */
+    private static final String[] PROMPT_MARKERS = {"$ ", "# ", "% "};
+
+    /** ANSI 转义序列 */
+    private static final Pattern ANSI = Pattern.compile("\\u001B\\[[0-9;]*[a-zA-Z]|\\u001B\\][^\\u0007\\u001B]*[\\u0007\\u001B]?");
+
     // ==================== WebSocket Handler 使用 ====================
 
-    /**
-     * 获取或创建终端会话，并注册初始监听器（WebSocket 用）。
-     * 监听器在读取线程启动前注册，确保推送包括 MOTD 在内的所有输出。
-     * <p>
-     * 注意：因为 {@link ConcurrentHashMap#computeIfAbsent} 在 key 已存在时不执行 lambda，
-     * 所以返回现有会话后需要手动注册监听器。
-     */
     public UnifiedTerminalSession getOrCreate(String connectionId, int cols, int rows,
                                               Consumer<String> initialListener) {
         var session = sessions.computeIfAbsent(connectionId, id -> {
@@ -62,10 +66,10 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                 channel.setPtySize(cols, rows, cols * 8, rows * 16);
                 channel.connect(10000);
 
-                var buffer = new StringBuilder();
                 var listeners = new CopyOnWriteArrayList<Consumer<String>>();
-
-                var s = new UnifiedTerminalSession(id, channel, buffer, listeners);
+                var s = new UnifiedTerminalSession(id, channel, listeners);
+                aiBuffers.put(id, new StringBuilder());
+                aiMode.put(id, false);
                 startReader(s);
                 log.info("终端会话创建成功 connectionId={}", id);
                 return s;
@@ -75,22 +79,16 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             }
         });
 
-        // 无论是新建还是已有会话，监听器都要注册
-        // computeIfAbsent 在会话已存在时不会执行 lambda，所以在这里补注册
         if (initialListener != null) {
             session.addListener(initialListener);
         }
         return session;
     }
 
-    /**
-     * 获取或创建终端会话（不带初始监听器，AI 工具调用时使用）。
-     */
     public UnifiedTerminalSession getOrCreate(String connectionId, int cols, int rows) {
         return getOrCreate(connectionId, cols, rows, null);
     }
 
-    /** 获取已存在的会话（不会自动创建） */
     public UnifiedTerminalSession getSession(String connectionId) {
         var session = sessions.get(connectionId);
         if (session == null) {
@@ -101,24 +99,92 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
 
     // ==================== AI 工具使用 ====================
 
-    /**
-     * 执行命令并等待输出。内部调用 {@link #getOrCreate}，终端会话不存在时会自动创建。
-     *
-     * @param connectionId SSH 连接 ID
-     * @param command      Shell 命令
-     * @return 命令输出文本（已去除 marker 标记行）
-     */
     public String executeCommand(String connectionId, String command) {
-        return getOrCreate(connectionId, 120, 24).executeCommand(command);
+        var session = getOrCreate(connectionId, 120, 24);
+        var aiBuffer = aiBuffers.get(connectionId);
+        if (aiBuffer == null) {
+            throw new IllegalStateException("AI 缓冲区不存在: " + connectionId);
+        }
+
+        // 1. 切换到 AI 模式，清空 AI 缓冲区
+        aiMode.put(connectionId, true);
+        synchronized (aiBuffer) {
+            aiBuffer.setLength(0);
+        }
+
+        try {
+            // 2. 写命令到 shell
+            var os = session.channel.getOutputStream();
+            String fullCommand = command.endsWith("\n") ? command : command + "\n";
+            os.write(fullCommand.getBytes(StandardCharsets.UTF_8));
+            os.flush();
+            log.debug("[AI] 命令已写入 connectionId={} command={}", connectionId, command);
+
+            // 3. 等待输出稳定 + prompt 出现
+            long deadline = System.currentTimeMillis() + 30_000;
+            int stableCount = 0;
+            final int STABLE_THRESHOLD = 3;          // 连续 N 轮无新数据
+            final int POLL_MS = 100;
+
+            while (System.currentTimeMillis() < deadline) {
+                int currentLen;
+                synchronized (aiBuffer) {
+                    currentLen = aiBuffer.length();
+                    if (currentLen == 0) {
+                        try { aiBuffer.wait(POLL_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                    }
+                }
+
+                synchronized (aiBuffer) {
+                    if (aiBuffer.length() > currentLen) {
+                        stableCount = 0; // 有新数据
+                    } else {
+                        stableCount++;
+                    }
+                }
+
+                if (stableCount >= STABLE_THRESHOLD) {
+                    String output;
+                    synchronized (aiBuffer) {
+                        output = aiBuffer.toString();
+                    }
+                    if (output.length() > 0 && containsPrompt(output)) {
+                        log.debug("[AI] 检测到 prompt，命令完成 connectionId={}", connectionId);
+                        break;
+                    }
+                    // 无 prompt 但持续稳定，也认为完成（如 tail -f 类命令不适合 prompt 检测）
+                    if (stableCount >= STABLE_THRESHOLD * 5) {
+                        log.debug("[AI] 无 prompt 但输出持续稳定，视为完成");
+                        break;
+                    }
+                }
+            }
+
+            // 4. 收集结果
+            String result;
+            synchronized (aiBuffer) {
+                result = aiBuffer.toString();
+                aiBuffer.setLength(0);
+            }
+
+            return cleanOutput(result, command);
+
+        } catch (IOException e) {
+            throw new RuntimeException("AI 命令写入失败: " + command, e);
+        } finally {
+            // 5. 切回正常模式
+            aiMode.put(connectionId, false);
+        }
     }
 
     // ==================== 生命周期 ====================
 
-    /** 关闭终端会话（SSH 断开连接时调用） */
     public void closeSession(String connectionId) {
         var session = sessions.remove(connectionId);
         if (session != null) {
             session.close();
+            aiBuffers.remove(connectionId);
+            aiMode.remove(connectionId);
             log.debug("终端会话已关闭 connectionId={}", connectionId);
         }
     }
@@ -130,22 +196,30 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
 
     // ==================== 内部 ====================
 
-    /** 启动后台读取线程：ChannelShell InputStream → 共享缓冲区 + WebSocket 监听器 */
+    /** 后台读取线程：根据模式写入对应缓冲区 + WebSocket 推送 */
     private void startReader(UnifiedTerminalSession session) {
         var thread = new Thread(() -> {
             try {
                 var in = session.channel.getInputStream();
-                var buf = new byte[1024];
+                var buf = new byte[4096];
                 while (!Thread.currentThread().isInterrupted()) {
                     var len = in.read(buf);
                     if (len > 0) {
-                        var chunk = new String(buf, 0, len);
-                        // AI 读缓冲区（后面通过 executeCommand 的 marker 机制消费）
-                        synchronized (session.outputBuffer) {
-                            session.outputBuffer.append(chunk);
-                        }
-                        // WebSocket 实时推送
+                        var chunk = new String(buf, 0, len, StandardCharsets.UTF_8);
+
+                        // 始终推送到 WebSocket 监听器（人能看到 AI 操作）
                         session.notifyListeners(chunk);
+
+                        // AI 模式：额外写入独立缓冲区
+                        if (Boolean.TRUE.equals(aiMode.get(session.connectionId))) {
+                            var aiBuffer = aiBuffers.get(session.connectionId);
+                            if (aiBuffer != null) {
+                                synchronized (aiBuffer) {
+                                    aiBuffer.append(chunk);
+                                    aiBuffer.notifyAll();
+                                }
+                            }
+                        }
                     } else if (len < 0) {
                         break;
                     }
@@ -162,96 +236,57 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         session.readerThread = thread;
     }
 
-    /** ANSI SGR 颜色/样式码：[...m */
-    private static final Pattern ANSI_SGR = Pattern.compile("\\u001B\\[[0-9;]*[a-zA-Z]");
-    /** OSC 终端标题序列：]...BEL */
-    private static final Pattern ANSI_OSC = Pattern.compile("\\u001B\\][^\\u0007\\u001B]*[\\u0007\\u001B]?");
-    /** Shell 提示符行：user@host:~$ 或 [root@host path]# */
-    private static final Pattern SHELL_PROMPT = Pattern.compile("[\\r\\n]\\[?[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\\r\\n]*?[#$]\\s*$");
-
-    /**
-     * 清理 SSH 通道返回的 ANSI 转义序列、命令回显和 shell 提示符。
-     * ChannelShell 是交互式 shell，stdin 写入的命令会被 PTY 回显（长命令还会被终端换行截断），
-     * 这些对 LLM 没有意义且容易误导。
-     */
-    private static String cleanOutput(String raw, String command) {
-        if (raw == null || raw.isEmpty()) return raw;
-        String s = raw;
-        // 1. 去掉 OSC 序列（终端标题设置等）
-        s = ANSI_OSC.matcher(s).replaceAll("");
-        // 2. 去掉 SGR 颜色/样式码
-        s = ANSI_SGR.matcher(s).replaceAll("");
-        // 3. 去掉开头的命令回显（PTY 会回显写入的 stdin，长命令会被终端宽度截断换行）
-        s = stripEchoedCommand(s, command);
-        // 4. 去掉最后的 shell 提示符行
-        s = SHELL_PROMPT.matcher(s).replaceAll("");
-        return s.trim();
+    /** 检查输出末尾是否包含 shell prompt */
+    private static boolean containsPrompt(String output) {
+        if (output == null || output.isEmpty()) return false;
+        String tail = output.length() > 80 ? output.substring(output.length() - 80) : output;
+        for (String marker : PROMPT_MARKERS) {
+            if (tail.contains(marker)) return true;
+        }
+        // 也匹配 user@host:dir$ 格式
+        return tail.matches("(?s).*@.*:[^\\n]*[$#]\\s*$");
     }
 
-    /**
-     * 去除输出开头的命令回显。双策略：
-     * 1. 精确匹配当前命令（忽略 PTY 换行带来的空白差异）
-     * 2. 兜底：如果输出开头行明显是 shell 命令回显（含 `|` `;` `||` `&&` 等），
-     *    直接切掉直到遇到第一个非命令行
-     */
-    private static String stripEchoedCommand(String output, String command) {
-        if (command == null || command.isEmpty() || output == null) return output;
+    /** 清理输出：去掉 ANSI 码、命令回显、末尾 prompt */
+    private static String cleanOutput(String output, String command) {
+        if (output == null || output.isEmpty()) return "";
+        String s = ANSI.matcher(output).replaceAll("");
+        s = s.replace("\r", "");
 
-        // 1. 尝试精确匹配当前命令
-        String result = stripExactCommand(output, command);
-        if (!result.equals(output)) return result;
+        String[] lines = s.split("\n");
+        var result = new java.util.ArrayList<String>();
 
-        // 2. 兜底：切掉开头的 shell 命令回显行（含管道/分隔符）
-        //    上一轮命令的回显可能泄漏到这里，归一化匹配失败时需要此策略
-        String[] lines = output.split("\\r?\\n");
-        int skip = 0;
-        for (String line : lines) {
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
             String t = line.trim();
-            if (t.isEmpty()) { skip++; continue; }
-            // 以常见命令开头，或包含 shell 管道/分隔符，视为回显行
-            if (t.matches("^(ls|find|cat|echo|ps|grep|file|md5sum|which|docker|systemctl|netstat|ss|ip|df|du|free|top|kill|chmod|chown|mkdir|rm|cp|mv|tail|head|wc|sort|uniq|cut|awk|sed|curl|wget|tar|gzip|unzip|apt|yum|pip|npm|python|node|java)\\b.*")
-                    || t.matches(".*[|;&].*")) {
-                skip++;
-            } else {
-                break; // 遇到非命令行，停止
-            }
+
+            // 空行跳过
+            if (t.isEmpty()) continue;
+
+            // 第一行：如果是命令回显，跳过
+            if (result.isEmpty() && isEchoLine(t, command)) continue;
+
+            // 最后一行：如果是 prompt，跳过
+            if (i == lines.length - 1 && isPromptLine(t)) continue;
+
+            result.add(line);
         }
-        if (skip > 0 && skip < lines.length) {
-            StringBuilder sb = new StringBuilder();
-            for (int i = skip; i < lines.length; i++) {
-                if (sb.length() > 0) sb.append('\n');
-                sb.append(lines[i]);
-            }
-            return sb.toString().trim();
-        }
-        return output;
+
+        return String.join("\n", result).trim();
     }
 
-    /** 归一化空白后精确匹配并切除命令回显 */
-    private static String stripExactCommand(String output, String command) {
-        String cmdNorm = command.replaceAll("\\s+", " ").trim();
-        String outNorm = output.replaceAll("\\s+", " ").trim();
-        if (!outNorm.startsWith(cmdNorm)) return output;
+    private static boolean isEchoLine(String line, String command) {
+        String cmd = command.trim();
+        if (line.equals(cmd)) return true;
+        if (cmd.length() > 10 && line.contains(cmd)) return true;
+        return false;
+    }
 
-        int cmdNormIdx = 0, origIdx = 0;
-        while (cmdNormIdx < cmdNorm.length() && origIdx < output.length()) {
-            char oc = output.charAt(origIdx);
-            if (Character.isWhitespace(oc)) {
-                origIdx++;
-                while (origIdx < output.length() && Character.isWhitespace(output.charAt(origIdx))) {
-                    origIdx++;
-                }
-                while (cmdNormIdx < cmdNorm.length() && cmdNorm.charAt(cmdNormIdx) == ' ') {
-                    cmdNormIdx++;
-                }
-            } else if (oc == cmdNorm.charAt(cmdNormIdx)) {
-                origIdx++;
-                cmdNormIdx++;
-            } else {
-                break;
-            }
+    private static boolean isPromptLine(String line) {
+        for (String marker : PROMPT_MARKERS) {
+            if (line.endsWith(marker.trim())) return true;
         }
-        return output.substring(origIdx).trim();
+        return line.matches(".*@.*:[^\\n]*[$#]\\s*$");
     }
 
     // ===================================================================
@@ -261,32 +296,27 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     public static class UnifiedTerminalSession {
         private final String connectionId;
         private final ChannelShell channel;
-        private final StringBuilder outputBuffer;
         private final List<Consumer<String>> listeners;
         private volatile boolean closed;
         private Thread readerThread;
 
         UnifiedTerminalSession(String connectionId, ChannelShell channel,
-                               StringBuilder outputBuffer, List<Consumer<String>> listeners) {
+                               List<Consumer<String>> listeners) {
             this.connectionId = connectionId;
             this.channel = channel;
-            this.outputBuffer = outputBuffer;
             this.listeners = listeners;
         }
 
         // ==================== WebSocket 使用 ====================
 
-        /** 注册实时输出监听器（WebSocket 连接时调用） */
         public void addListener(Consumer<String> listener) {
             listeners.add(listener);
         }
 
-        /** 移除监听器（WebSocket 断开时调用） */
         public void removeListener(Consumer<String> listener) {
             listeners.remove(listener);
         }
 
-        /** 写入用户输入 */
         public void writeUserInput(String data) {
             try {
                 var os = channel.getOutputStream();
@@ -294,70 +324,10 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                     log.warn("OutputStream 为 null connectionId={}", connectionId);
                     return;
                 }
-                os.write(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                os.write(data.getBytes(StandardCharsets.UTF_8));
                 os.flush();
             } catch (IOException e) {
                 log.warn("写入用户输入失败 connectionId={}", connectionId, e);
-            }
-        }
-
-        // ==================== AI 工具使用 ====================
-
-        /**
-         * AI 执行命令：写命令 → 写唯一 marker → 轮询等待 marker 出现 → 返回输出。
-         * <p>
-         * 不和用户输入互斥——SSH shell 的 stdin 本身会排队处理。
-         */
-        public String executeCommand(String command) {
-            // 双重清除：清空 → 等残余输出到达 → 再清空
-            // LLM 可能一次生成多个 function call，ADK 连续调用本方法，
-            // 上一个命令的 shell prompt 可能还在 SSH 通道中未到达
-            synchronized (outputBuffer) {
-                outputBuffer.setLength(0);
-            }
-            try { Thread.sleep(200); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            synchronized (outputBuffer) {
-                outputBuffer.setLength(0);
-            }
-
-            // 生成唯一 marker（随机后缀防止误匹配）
-            var marker = "__AI_END__" + UUID.randomUUID().toString().substring(0, 8) + "__";
-
-            try {
-                var os = channel.getOutputStream();
-                // 写命令
-                os.write((command + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                os.flush();
-
-                // 等输出开始到达
-                Thread.sleep(300);
-
-                // 写 marker
-                os.write(("echo \"" + marker + "\"\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                os.flush();
-
-                // 轮询等待 marker
-                var deadline = System.currentTimeMillis() + 30_000;
-                while (System.currentTimeMillis() < deadline) {
-                    synchronized (outputBuffer) {
-                        var content = outputBuffer.toString();
-                        var idx = content.indexOf(marker);
-                        if (idx >= 0) {
-                            var raw = content.substring(0, idx);
-                            outputBuffer.delete(0, idx + marker.length());
-                            return cleanOutput(raw, command);
-                        }
-                    }
-                    Thread.sleep(100);
-                }
-
-                throw new RuntimeException("AI 命令执行超时(30s): " + command);
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("AI 命令执行被中断");
-            } catch (IOException e) {
-                throw new RuntimeException("AI 命令写入失败: " + command, e);
             }
         }
 
