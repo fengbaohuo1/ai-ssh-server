@@ -124,7 +124,20 @@ public class AgentServiceController implements IAgentService {
         try {
             String step = buildStep(event);
             String text = eventText(event);
-            // 保留所有内容包括 \n\n（Markdown 段落分隔依赖它）
+
+            // [DEBUG] 追踪纯空白文本事件（如 \n\n）
+            if (text != null && !text.isEmpty() && text.trim().isEmpty()) {
+                String raw = event.stringifyContent();
+                log.warn("[SSE_DBG] whitespace text: escaped='{}' raw='{}' final={} partial={} err={} calls={} resps={}",
+                        text.replace("\n", "\\n").replace("\r", "\\r"),
+                        raw != null ? raw.replace("\n", "\\n").replace("\r", "\\r") : "null",
+                        event.finalResponse(),
+                        event.partial().orElse(false),
+                        event.errorCode().isPresent(),
+                        event.functionCalls().size(),
+                        event.functionResponses().size());
+            }
+
             if (step != null && text != null && !text.isEmpty())
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + ",\"s\":[" + step + "]}"));
             else if (step != null)
