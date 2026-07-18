@@ -125,12 +125,6 @@ public class AgentServiceController implements IAgentService {
             String step = buildStep(event);
             String text = eventText(event);
 
-            // 跳过纯空白文本事件（如 DeepSeek 流中独立的 \n\n token）
-            if (step == null && text != null && text.trim().isEmpty()) {
-                log.trace("[SSE] skip whitespace-only text event");
-                return;
-            }
-
             if (step != null && text != null && !text.isEmpty())
                 emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + ",\"s\":[" + step + "]}"));
             else if (step != null)
