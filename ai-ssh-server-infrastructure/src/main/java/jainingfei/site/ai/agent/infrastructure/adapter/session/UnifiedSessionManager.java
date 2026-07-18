@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * 统一终端会话管理器 — 一个 {@code connectionId} 只维护一个 ChannelShell。
@@ -161,6 +162,29 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         session.readerThread = thread;
     }
 
+    /** ANSI SGR 颜色/样式码：[...m */
+    private static final Pattern ANSI_SGR = Pattern.compile("\\u001B\\[[0-9;]*[a-zA-Z]");
+    /** OSC 终端标题序列：]...BEL */
+    private static final Pattern ANSI_OSC = Pattern.compile("\\u001B\\][^\\u0007\\u001B]*[\\u0007\\u001B]?");
+    /** Shell 提示符行：user@host:~$ 或 [root@host path]# */
+    private static final Pattern SHELL_PROMPT = Pattern.compile("[\\r\\n]\\[?[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\\r\\n]*?[#$]\\s*$");
+
+    /**
+     * 清理 SSH 通道返回的 ANSI 转义序列和 shell 提示符。
+     * ChannelShell 会输出颜色码、终端标题设置、shell prompt 等，这些对 LLM 没有意义且浪费 token。
+     */
+    private static String cleanOutput(String raw) {
+        if (raw == null || raw.isEmpty()) return raw;
+        String s = raw;
+        // 1. 去掉 OSC 序列（终端标题设置等）
+        s = ANSI_OSC.matcher(s).replaceAll("");
+        // 2. 去掉 SGR 颜色/样式码
+        s = ANSI_SGR.matcher(s).replaceAll("");
+        // 3. 去掉最后的 shell 提示符行
+        s = SHELL_PROMPT.matcher(s).replaceAll("");
+        return s.trim();
+    }
+
     // ===================================================================
     // 内部类：统一终端会话
     // ===================================================================
@@ -246,9 +270,9 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                         var content = outputBuffer.toString();
                         var idx = content.indexOf(marker);
                         if (idx >= 0) {
-                            var output = content.substring(0, idx).trim();
+                            var raw = content.substring(0, idx);
                             outputBuffer.delete(0, idx + marker.length());
-                            return output;
+                            return cleanOutput(raw);
                         }
                     }
                     Thread.sleep(100);
