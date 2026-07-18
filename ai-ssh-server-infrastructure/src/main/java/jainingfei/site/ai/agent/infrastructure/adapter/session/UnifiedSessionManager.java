@@ -170,19 +170,55 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     private static final Pattern SHELL_PROMPT = Pattern.compile("[\\r\\n]\\[?[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+[^\\r\\n]*?[#$]\\s*$");
 
     /**
-     * 清理 SSH 通道返回的 ANSI 转义序列和 shell 提示符。
-     * ChannelShell 会输出颜色码、终端标题设置、shell prompt 等，这些对 LLM 没有意义且浪费 token。
+     * 清理 SSH 通道返回的 ANSI 转义序列、命令回显和 shell 提示符。
+     * ChannelShell 是交互式 shell，stdin 写入的命令会被 PTY 回显（长命令还会被终端换行截断），
+     * 这些对 LLM 没有意义且容易误导。
      */
-    private static String cleanOutput(String raw) {
+    private static String cleanOutput(String raw, String command) {
         if (raw == null || raw.isEmpty()) return raw;
         String s = raw;
         // 1. 去掉 OSC 序列（终端标题设置等）
         s = ANSI_OSC.matcher(s).replaceAll("");
         // 2. 去掉 SGR 颜色/样式码
         s = ANSI_SGR.matcher(s).replaceAll("");
-        // 3. 去掉最后的 shell 提示符行
+        // 3. 去掉开头的命令回显（PTY 会回显写入的 stdin，长命令会被终端宽度截断换行）
+        s = stripEchoedCommand(s, command);
+        // 4. 去掉最后的 shell 提示符行
         s = SHELL_PROMPT.matcher(s).replaceAll("");
         return s.trim();
+    }
+
+    /**
+     * 去除输出开头的命令回显。PTY 回显时会在终端宽度处插入 \r\n 换行，
+     * 所以不能用简单的 startsWith 比较，需要忽略空白差异来匹配。
+     */
+    private static String stripEchoedCommand(String output, String command) {
+        if (command == null || command.isEmpty()) return output;
+        // 归一化：把所有连续空白（空格、\r、\n）合并为单一空格
+        String cmdNorm = command.replaceAll("\\s+", " ").trim();
+        String outNorm = output.replaceAll("\\s+", " ").trim();
+        if (!outNorm.startsWith(cmdNorm)) return output;
+
+        // 找到归一化命令在原始输出中的结束位置
+        int cmdNormIdx = 0, origIdx = 0;
+        while (cmdNormIdx < cmdNorm.length() && origIdx < output.length()) {
+            if (Character.isWhitespace(output.charAt(origIdx))) {
+                // 原始位置跳过空白，归一化位置跳到下一个非空白
+                origIdx++;
+                while (origIdx < output.length() && Character.isWhitespace(output.charAt(origIdx))) {
+                    origIdx++;
+                }
+                while (cmdNormIdx < cmdNorm.length() && cmdNorm.charAt(cmdNormIdx) == ' ') {
+                    cmdNormIdx++;
+                }
+            } else if (output.charAt(origIdx) == cmdNorm.charAt(cmdNormIdx)) {
+                origIdx++;
+                cmdNormIdx++;
+            } else {
+                break;
+            }
+        }
+        return output.substring(origIdx).trim();
     }
 
     // ===================================================================
@@ -270,7 +306,7 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
                         if (idx >= 0) {
                             var raw = content.substring(0, idx);
                             outputBuffer.delete(0, idx + marker.length());
-                            return cleanOutput(raw);
+                            return cleanOutput(raw, command);
                         }
                     }
                     Thread.sleep(100);
