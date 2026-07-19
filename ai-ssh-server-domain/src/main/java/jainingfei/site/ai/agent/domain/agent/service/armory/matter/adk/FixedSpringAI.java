@@ -25,6 +25,7 @@ import org.springframework.ai.tool.ToolCallback;
 import reactor.core.publisher.Flux;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,6 +37,7 @@ import java.util.Map;
  * {@code handleUserContent} 中原有 TODO 跳过 functionResponse → ToolResponseMessage 转换，
  * 导致工具执行结果无法回填对话，DeepSeek API 返回 400。
  */
+@Slf4j
 public class FixedSpringAI extends BaseLlm {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -188,9 +190,22 @@ public class FixedSpringAI extends BaseLlm {
             return LlmResponse.builder().build();
         }
         AssistantMessage am = cr.getResult().getOutput();
+        String rawText = am.getText();
+        int toolCount = am.getToolCalls().size();
+
+        // [TRACE] 追踪 \n\n 来源
+        if (rawText == null || rawText.isEmpty()) {
+            if (toolCount == 0) {
+                log.warn("[TRACE_SPRING] ChatResponse with NO text and NO tools! metadata={}", cr.getMetadata());
+            }
+        } else if (rawText.trim().isEmpty()) {
+            log.warn("[TRACE_SPRING] ChatResponse with WS-only text: '{}' tools={} metadata={}",
+                    rawText.replace("\n", "\\n").replace("\r", "\\r"), toolCount, cr.getMetadata());
+        }
+
         List<Part> parts = new ArrayList<>();
-        if (am.getText() != null && !am.getText().isEmpty()) {
-            parts.add(Part.fromText(am.getText()));
+        if (rawText != null && !rawText.isEmpty()) {
+            parts.add(Part.fromText(rawText));
         }
         for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
             if ("function".equals(tc.type())) {
