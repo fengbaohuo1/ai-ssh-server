@@ -25,7 +25,6 @@ import org.springframework.ai.tool.ToolCallback;
 import reactor.core.publisher.Flux;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +36,6 @@ import java.util.Map;
  * {@code handleUserContent} 中原有 TODO 跳过 functionResponse → ToolResponseMessage 转换，
  * 导致工具执行结果无法回填对话，DeepSeek API 返回 400。
  */
-@Slf4j
 public class FixedSpringAI extends BaseLlm {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -175,13 +173,26 @@ public class FixedSpringAI extends BaseLlm {
 
     // ===== ChatResponse → LlmResponse =====
 
-    /** 过滤 Spring AI 流式的完全空 chunk（没有文本也没有工具调用）。
-     *  注意：不过滤纯空白文本（如 \\n\\n），那是 LLM 的段落分隔，交给 Controller 缓冲处理。 */
+    /**
+     * 过滤 Spring AI 流式中的空/纯空白 chunk。
+     * 纯空白（\n\n）且 completionTokens=0 → Spring AI 内部 meta-event，丢弃。
+     * 纯空白（\n\n）且 completionTokens>0 → LLM 真实段落分隔，保留。
+     */
     private boolean isNotEmpty(ChatResponse cr) {
         if (cr == null || cr.getResults().isEmpty()) return false;
         AssistantMessage am = cr.getResult().getOutput();
-        boolean hasText = am.getText() != null && !am.getText().isEmpty();
+        String text = am.getText();
+        boolean hasText = text != null && !text.isEmpty();
         boolean hasTools = !am.getToolCalls().isEmpty();
+
+        // 纯空白 + 无 tool call：检查是否 Spring AI meta-event
+        if (!hasTools && hasText && text.trim().isEmpty()) {
+            var usage = cr.getMetadata() != null ? cr.getMetadata().getUsage() : null;
+            if (usage != null) {
+                // completionTokens=0 → Spring AI 内部 meta-event，丢弃
+                if (usage.getCompletionTokens() == 0) return false;
+            }
+        }
         return hasText || hasTools;
     }
 
@@ -191,17 +202,6 @@ public class FixedSpringAI extends BaseLlm {
         }
         AssistantMessage am = cr.getResult().getOutput();
         String rawText = am.getText();
-        int toolCount = am.getToolCalls().size();
-
-        // [TRACE] 追踪 \n\n 来源
-        if (rawText == null || rawText.isEmpty()) {
-            if (toolCount == 0) {
-                log.warn("[TRACE_SPRING] ChatResponse with NO text and NO tools! metadata={}", cr.getMetadata());
-            }
-        } else if (rawText.trim().isEmpty()) {
-            log.warn("[TRACE_SPRING] ChatResponse with WS-only text: '{}' tools={} metadata={}",
-                    rawText.replace("\n", "\\n").replace("\r", "\\r"), toolCount, cr.getMetadata());
-        }
 
         List<Part> parts = new ArrayList<>();
         if (rawText != null && !rawText.isEmpty()) {
