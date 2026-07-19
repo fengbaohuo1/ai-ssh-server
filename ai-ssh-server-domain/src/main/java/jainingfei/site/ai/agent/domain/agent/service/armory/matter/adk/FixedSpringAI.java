@@ -176,14 +176,15 @@ public class FixedSpringAI extends BaseLlm {
     // ===== ChatResponse → LlmResponse =====
 
     /**
-     * 过滤 Spring AI 流式的完全空 chunk（没有任何内容也没有工具调用）。
-     * 不过滤纯空白文本（如 \n\n）——流式模式下无法用 token 数可靠区分 Spring AI meta-event 和 LLM 段落分隔，
-     * 换行规整交给前端 norm() 函数。
+     * 过滤 Spring AI 流式空/纯空白 chunk。
+     * 纯空白 + 无工具调用 → Spring AI meta-event 或 LLM 段落分隔。
+     * 二者在事件层无法可靠区分，但纯空白文本对后续处理无实际意义，统一过滤。
      */
     private boolean isNotEmpty(ChatResponse cr) {
         if (cr == null || cr.getResults().isEmpty()) return false;
         AssistantMessage am = cr.getResult().getOutput();
-        boolean hasText = am.getText() != null && !am.getText().isEmpty();
+        String text = am.getText();
+        boolean hasText = text != null && !text.trim().isEmpty();
         boolean hasTools = !am.getToolCalls().isEmpty();
         return hasText || hasTools;
     }
