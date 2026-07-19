@@ -209,7 +209,7 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         // 如果 TerminalSession 存在，通知 WebSocket（终端能看到 AI 操作）
         var session = sessions.get(connectionId);
         if (session != null && !session.isClosed()) {
-            session.notifyListeners("\r\n[33m🤖 " + command + "[0m\r\n");
+            session.notifyListeners("\r\n🤖 " + command + "\r\n");
         }
 
         ChannelExec channel = null;
@@ -232,6 +232,7 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
 
             if (session != null && !session.isClosed()) {
                 session.notifyListeners(result);
+                if (!result.endsWith("\n")) session.notifyListeners("\r\n");
             }
 
             log.debug("[EXEC] connectionId={} command={} outputLen={}", connectionId, command, result.length());
