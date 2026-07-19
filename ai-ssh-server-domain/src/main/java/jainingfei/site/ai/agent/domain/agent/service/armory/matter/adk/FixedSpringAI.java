@@ -131,7 +131,9 @@ public class FixedSpringAI extends BaseLlm {
                 FunctionResponse fr = part.functionResponse().get();
                 String id = fr.id().orElse("");
                 String name = fr.name().orElse("");
-                String data = fr.response().map(Object::toString).orElse("{}");
+                String data = fr.response().map(r -> {
+                    try { return MAPPER.writeValueAsString(r); } catch (Exception e) { return "{}"; }
+                }).orElse("{}");
                 toolResponses.add(new ToolResponseMessage.ToolResponse(id, name, data));
             }
         }
