@@ -6,6 +6,7 @@ import com.google.adk.runner.InMemoryRunner;
 import com.google.adk.sessions.Session;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
+import java.util.Optional;
 import io.reactivex.rxjava3.core.Flowable;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatCommandEntity;
@@ -134,7 +135,7 @@ public class ChatService implements IChatService {
         String serverContext = "";
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
             log.info("设置 SSH 连接 ID: {}", terminalSessionId);
-            SshExecuteAdkTool.setCurrentTerminalSession(terminalSessionId);
+            SshExecuteAdkTool.bindSession(effectiveSessionId, terminalSessionId);
             // 查询服务器信息，注入到 LLM 上下文，让它知道连了哪台机器
             try {
                 SshConnectionAggregate aggregate = sshConnectionService.queryConnectionDetail(terminalSessionId);

@@ -1,87 +1,112 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
 
-import com.google.adk.tools.Annotations;
+import com.google.adk.tools.BaseTool;
+import com.google.adk.tools.ToolContext;
+import com.google.genai.types.FunctionDeclaration;
+import com.google.genai.types.Schema;
+import com.google.genai.types.Type;
+import io.reactivex.rxjava3.core.Single;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshTerminalService;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Scope;
+import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * SSH 命令执行 ADK 工具 — 为智能体提供在 SSH 终端执行命令的能力。
- * <p>
- * 使用静态字段持有 connectionId（ADK 使用线程池，ThreadLocal 无法跨线程传递）。
- * 通过 ADK 原生 {@code FunctionTool.create()} 注册到 LlmAgent。
+ * SSH 命令执行 ADK 工具——直接继承 {@link BaseTool}。
  *
  * <pre>
  * 调用链路:
- *   AgentServiceController → ChatService (set currentConnectionId)
+ *   AgentServiceController → ChatService（写静态 map，key=sessionId）
  *     → InMemoryRunner.runAsync() → LlmAgent
- *       → SshExecuteAdkTool.executeCommand (read static field)
- *         → ISshTerminalService.executeCommand(connectionId, command)
- *           → UnifiedSessionManager.executeCommand()
+ *       → SshExecuteAdkTool.runAsync(args, toolContext)
+ *         → 读 sessionConnections.get(ctx.invocationContext().session().id())
+ *           → ISshTerminalService.execCommand(connectionId, command)
  * </pre>
  */
 @Slf4j
-@Service
-public class SshExecuteAdkTool {
+@Component
+@Scope("prototype")
+public class SshExecuteAdkTool extends BaseTool {
 
-    /** 当前绑定的 SSH 连接 ID（静态字段，ADK 线程池中仍可访问） */
-    private static String currentConnectionId;
-
-    /** 连续空命令调用计数器，防止劣质 LLM 死循环 */
-    private static final ConcurrentHashMap<String, AtomicInteger> emptyCallCounters = new ConcurrentHashMap<>();
-    /** 连续空命令上限，超过则强制中断 */
+    /** 连续空命令上限 */
     private static final int MAX_EMPTY_CALLS = 3;
+
+    /** sessionId → connectionId（静态，多会话安全） */
+    private static final ConcurrentHashMap<String, String> sessionConnections = new ConcurrentHashMap<>();
 
     @Resource
     private ISshTerminalService sshTerminalService;
 
+    /** 连续空命令调用计数器（per-connectionId，实例级，线程安全） */
+    private final ConcurrentHashMap<String, AtomicInteger> emptyCallCounters = new ConcurrentHashMap<>();
+
     /**
-     * 设置当前绑定的 SSH 连接 ID
+     * 绑定会话到 SSH 连接。ChatService 在 runAsync 之前调用。
      */
-    public static void setCurrentTerminalSession(String connectionId) {
-        currentConnectionId = connectionId;
-        log.trace("[SshExecuteAdkTool] 设置连接: thread={}, connectionId={}",
-                Thread.currentThread().getName(), connectionId);
+    public static void bindSession(String sessionId, String connectionId) {
+        sessionConnections.put(sessionId, connectionId);
+        log.debug("绑定会话: sessionId={} connectionId={}", sessionId, connectionId);
     }
 
     /**
-     * 清除绑定
+     * 解绑会话。
      */
-    public static void clearCurrentTerminalSession() {
-        currentConnectionId = null;
+    public static void unbindSession(String sessionId) {
+        sessionConnections.remove(sessionId);
     }
 
-    /**
-     * 在 SSH 终端执行命令并返回输出。
-     * <p>
-     * 被 {@code FunctionTool.create(bean, "executeCommand")} 识别为 ADK 原生工具。
-     *
-     * @param command 要执行的 Shell 命令
-     * @return 包含 command / output / success / suggestion 的结构化结果
-     */
-    public Map<String, Object> executeCommand(
-            @Annotations.Schema(name = "command", description = "要执行的 Shell 命令，如: ls -la, apt install docker.io, docker --version")
-            String command) {
-        String connectionId = currentConnectionId;
+    public SshExecuteAdkTool() {
+        super("executeCommand",
+                "Execute a shell command on the remote server via SSH. "
+                        + "Returns a structured result with command, output, success flag, and optional suggestion.");
+    }
 
-        log.debug("[EXEC] thread={} connectionId={} command='{}'",
-                Thread.currentThread().getName(), connectionId, command);
+    /** 工具声明：参数 schema 在注册时直接注入 LlmAgent */
+    @Override
+    public Optional<FunctionDeclaration> declaration() {
+        return Optional.of(FunctionDeclaration.builder()
+                .name("executeCommand")
+                .description("Execute a shell command on the remote server via SSH")
+                .parameters(Schema.builder()
+                        .type(new Type(Type.Known.OBJECT))
+                        .properties(Map.of("command",
+                                Schema.builder()
+                                        .type(new Type(Type.Known.STRING))
+                                        .description("Shell command to execute, e.g., ls -la, apt install docker.io, docker --version")
+                                        .build()))
+                        .required(List.of("command"))
+                        .build())
+                .build());
+    }
 
+    @Override
+    public Single<Map<String, Object>> runAsync(Map<String, Object> args, ToolContext toolContext) {
+        return Single.fromCallable(() -> execute(args, toolContext));
+    }
+
+    private Map<String, Object> execute(Map<String, Object> args, ToolContext ctx) {
+        // 通过 ADK 会话 ID 从静态 map 中读取 connectionId（ChatService 在调用前写入）
+        String sessionId = ctx.invocationContext().session().id();
+        String connectionId = sessionConnections.get(sessionId);
+
+        String command = (String) args.get("command");
+        log.debug("[EXEC] connectionId={} command='{}'", connectionId, command);
+
+        // 未绑定连接
         if (connectionId == null || connectionId.isEmpty()) {
             log.warn("[EXEC] 未绑定 SSH 连接 → 返回提示");
-            Map<String, Object> r = new HashMap<>();
-            r.put("success", true);
-            r.put("output", "未绑定 SSH 终端会话。请先选择一台已连接的服务器。");
-            r.put("command", command != null ? command : "");
-            return r;
+            return result(true, command, "未绑定 SSH 终端会话。请先选择一台已连接的服务器。", null);
         }
 
+        // 空命令熔断
         if (command == null || command.isEmpty()) {
             int count = emptyCallCounters
                     .computeIfAbsent(connectionId, k -> new AtomicInteger(0))
@@ -89,34 +114,20 @@ public class SshExecuteAdkTool {
             log.warn("[EXEC] 空命令 (连续第{}次)", count);
 
             if (count >= MAX_EMPTY_CALLS) {
-                log.warn("[EXEC] 连续{}次空命令 → 强制中断", count);
                 emptyCallCounters.remove(connectionId);
-                Map<String, Object> r = new HashMap<>();
-                r.put("success", true);
-                r.put("command", "");
-                r.put("output", "已中断重复调用。请直接用文字向用户说明当前情况，不要再调用 executeCommand。");
-                return r;
+                return result(true, "",
+                        "已中断重复调用。请直接用文字向用户说明当前情况，不要再调用 executeCommand。", null);
             }
-
-            Map<String, Object> r = new HashMap<>();
-            r.put("success", false);
-            r.put("command", "");
-            r.put("output", "参数缺失：executeCommand 必须提供 command 参数。示例：command=\"ls -la\"");
-            return r;
+            return result(false, "", "参数缺失：executeCommand 必须提供 command 参数。示例：command=\"ls -la\"", null);
         }
 
         // 收到有效命令，重置空调用计数器
         emptyCallCounters.remove(connectionId);
 
         try {
-            // sessionExists 也可能抛异常，包在 try 里
             if (!sshTerminalService.sessionExists(connectionId)) {
                 log.warn("[EXEC] 终端会话不存在: {}", connectionId);
-                Map<String, Object> r = new HashMap<>();
-                r.put("success", false);
-                r.put("command", command);
-                r.put("output", "SSH 终端会话不存在或已关闭: " + connectionId);
-                return r;
+                return result(false, command, "SSH 终端会话不存在或已关闭: " + connectionId, null);
             }
 
             log.info("[EXEC] 开始SSH执行: connectionId={} command={}", connectionId, command);
@@ -124,72 +135,52 @@ public class SshExecuteAdkTool {
             log.info("[EXEC] SSH执行完成: outputLength={}", output.length());
 
             boolean success = isExecutionSuccessful(output);
-
-            Map<String, Object> result = new HashMap<>();
-            result.put("command", command);
-            result.put("output", output);
-            result.put("success", success);
-
-            if (!success) {
-                result.put("suggestion", analyzeError(output));
-            }
-
-            log.info("[EXEC] 返回结果: success={}", success);
-            return result;
+            return result(success, command, output, success ? null : analyzeError(output));
 
         } catch (Exception e) {
             log.error("[EXEC] 异常: connectionId={} command={}", connectionId, command, e);
-            Map<String, Object> r = new HashMap<>();
-            r.put("success", false);
-            r.put("command", command != null ? command : "");
-            r.put("output", "命令执行异常: " + e.getMessage());
-            return r;
+            return result(false, command != null ? command : "",
+                    "命令执行异常: " + e.getMessage(), null);
         }
     }
 
-    /**
-     * 判断命令执行是否成功
-     */
-    private boolean isExecutionSuccessful(String output) {
-        if (output == null || output.isEmpty()) {
-            return true;
-        }
+    // ===== 统一返回结构 =====
 
-        String lowerOutput = output.toLowerCase();
-        String[] errorIndicators = {
+    private static Map<String, Object> result(boolean success, String command,
+                                               String output, String suggestion) {
+        Map<String, Object> r = new HashMap<>();
+        r.put("success", success);
+        r.put("command", command);
+        r.put("output", output);
+        if (suggestion != null) {
+            r.put("suggestion", suggestion);
+        }
+        return r;
+    }
+
+    // ===== 错误检测 =====
+
+    private boolean isExecutionSuccessful(String output) {
+        if (output == null || output.isEmpty()) return true;
+        String lower = output.toLowerCase();
+        return !java.util.stream.Stream.of(
                 "command not found", "permission denied",
                 "operation not permitted", "error:", "failed",
                 "fatal:", "unable to", "connection refused", "network is unreachable"
-        };
-
-        for (String indicator : errorIndicators) {
-            if (lowerOutput.contains(indicator)) {
-                return false;
-            }
-        }
-        return true;
+        ).anyMatch(lower::contains);
     }
 
-    /**
-     * 分析错误并提供解决建议
-     */
     private String analyzeError(String output) {
         if (output == null) return null;
-
-        String lowerOutput = output.toLowerCase();
-
-        if (lowerOutput.contains("command not found")) {
-            return "命令不存在。可能原因：命令拼写错误、软件未安装、或命令不在 PATH 中。建议检查命令名称或安装对应软件包。";
-        }
-        if (lowerOutput.contains("permission denied")) {
+        String lower = output.toLowerCase();
+        if (lower.contains("command not found"))
+            return "命令不存在。可能原因：命令拼写错误、软件未安装、或命令不在 PATH 中。";
+        if (lower.contains("permission denied"))
             return "权限不足。建议使用 sudo 提升权限，或检查文件/目录权限。";
-        }
-        if (lowerOutput.contains("no such file or directory")) {
+        if (lower.contains("no such file or directory"))
             return "文件或目录不存在。建议检查路径是否正确，或使用绝对路径。";
-        }
-        if (lowerOutput.contains("connection refused") || lowerOutput.contains("network is unreachable")) {
+        if (lower.contains("connection refused") || lower.contains("network is unreachable"))
             return "网络连接问题。建议检查网络连接、确认目标服务是否运行、检查防火墙设置。";
-        }
         return "执行失败，请检查命令和输出信息。";
     }
 }

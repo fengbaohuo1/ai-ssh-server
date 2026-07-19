@@ -2,7 +2,6 @@ package jainingfei.site.ai.agent.domain.agent.service.armory.node;
 
 import com.google.adk.agents.LlmAgent;
 import com.google.adk.tools.BaseToolset;
-import com.google.adk.tools.FunctionTool;
 import jakarta.annotation.Resource;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ArmoryCommandEntity;
@@ -37,14 +36,8 @@ public class AgentNode extends AbstractArmorySupport {
         AiAgentConfigTableVO aiAgentConfigTableVO = requestParameter.getAiAgentConfigTableVO();
         List<AiAgentConfigTableVO.Module.Agent> agents = aiAgentConfigTableVO.getModule().getAgents();
 
-        // 注册 ADK 原生工具：SSH 命令执行
-        try {
-            FunctionTool sshTool = FunctionTool.create(sshExecuteAdkTool, "executeCommand");
-            mcpToolsets.add(new StaticToolset(List.of(sshTool)));
-            log.info("SSH 执行 ADK 工具注册成功");
-        } catch (Exception e) {
-            log.error("创建 SSH ADK 工具失败", e);
-        }
+        // 注册 ADK 原生工具：SSH 命令执行（SshExecuteAdkTool extends BaseTool）
+        mcpToolsets.add(new StaticToolset(List.of(sshExecuteAdkTool)));
 
         for (AiAgentConfigTableVO.Module.Agent agentConfig : agents) {
             LlmAgent llmAgent = LlmAgent.builder()

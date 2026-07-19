@@ -4,7 +4,6 @@ import com.google.adk.events.Event;
 import io.reactivex.rxjava3.core.Flowable;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jainingfei.site.ai.agent.domain.ssh.model.aggregate.SshConnectionAggregate;
 import jainingfei.site.ai.agent.domain.ssh.model.entity.SshConnectionConfigEntity;
 import jainingfei.site.ai.agent.domain.ssh.model.entity.SshConnectionEntity;
@@ -109,9 +108,8 @@ public class SshAgentMvpTest {
         chatSessionId = chatService.createSession(AGENT_ID, USER_ID);
         log.info("3. AI 对话会话已创建 chatSessionId={}", chatSessionId);
 
-        // 4. 绑定 connectionId 到静态字段（供 SshExecuteAdkTool 在 ADK 线程中读取）
-        SshExecuteAdkTool.setCurrentTerminalSession(connectionId);
-        log.info("4. 已绑定 SSH 连接 connectionId={}", connectionId);
+        // 4. connectionId 由 ChatService.handleMessageStream() 写入 ADK 会话 state
+        log.info("4. SSH 连接已就绪 connectionId={}（每次对话时写入会话状态）", connectionId);
         log.info("========== MVP 初始化完成，可以开始对话了 ==========\n");
     }
 
@@ -142,9 +140,6 @@ public class SshAgentMvpTest {
             }
 
             try {
-                // 每次对话前重新绑定 connectionId（防止异步线程丢失上下文）
-                SshExecuteAdkTool.setCurrentTerminalSession(connectionId);
-
                 System.out.print("AI > ");
                 chatService.handleMessageStream(
                                 AGENT_ID, USER_ID, chatSessionId, input, connectionId)
@@ -170,8 +165,6 @@ public class SshAgentMvpTest {
      */
     @Test
     public void test_singleChat() {
-        SshExecuteAdkTool.setCurrentTerminalSession(connectionId);
-
         String message = "查看服务器系统信息，包括操作系统版本、CPU、内存";
         log.info("发送消息: {}", message);
 

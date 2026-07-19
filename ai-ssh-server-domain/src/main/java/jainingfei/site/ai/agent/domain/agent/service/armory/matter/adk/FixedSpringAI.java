@@ -4,13 +4,13 @@ import com.google.adk.models.BaseLlm;
 import com.google.adk.models.BaseLlmConnection;
 import com.google.adk.models.LlmRequest;
 import com.google.adk.models.LlmResponse;
+import com.google.adk.models.springai.ToolConverter;
 import com.google.genai.types.Content;
 import com.google.genai.types.FunctionCall;
 import com.google.genai.types.FunctionResponse;
 import com.google.genai.types.Part;
 import io.reactivex.rxjava3.core.Flowable;
 
-import com.google.adk.models.springai.ToolConverter;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -22,19 +22,26 @@ import org.springframework.ai.chat.model.StreamingChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
-import reactor.core.publisher.Flux;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 修复版 SpringAI适配器：修正 ADK MessageConverter 不转换 functionResponse 的问题。
- * <p>
- * {@code handleUserContent} 中原有 TODO 跳过 functionResponse → ToolResponseMessage 转换，
- * 导致工具执行结果无法回填对话，DeepSeek API 返回 400。
+ * ADK Spring AI 适配器——Spring AI 做 LLM 通信，ADK 做工具编排。
+ *
+ * <pre>
+ * 工具流：
+ *   toPrompt(): ADK 工具 → ToolConverter → Spring AI ToolCallback → LLM（原生 function calling）
+ *   toLlmResponse(): Spring AI ChatResponse → ADK LlmResponse（文本 + FunctionCall parts）
+ *
+ * \n\n 处理：
+ *   isNotEmpty() 上下文感知——流中已出现 tool call 后过滤纯空白 chunk（artifact），
+ *   纯文本对话中保留（真实段落分隔）。
+ * </pre>
  */
 public class FixedSpringAI extends BaseLlm {
 
@@ -54,9 +61,12 @@ public class FixedSpringAI extends BaseLlm {
         try {
             Prompt prompt = toPrompt(req);
             if (stream && streamingChatModel != null) {
+                boolean hasTools = req.tools() != null && !req.tools().isEmpty();
+                AtomicInteger consecutiveWs = new AtomicInteger(0);
+
                 return Flowable.fromPublisher(
                         streamingChatModel.stream(prompt)
-                                .filter(this::isNotEmpty)
+                                .filter(cr -> isNotEmpty(cr, hasTools, consecutiveWs))
                                 .map(this::toLlmResponse));
             }
             ChatResponse resp = chatModel.call(prompt);
@@ -103,7 +113,7 @@ public class FixedSpringAI extends BaseLlm {
             messages.add(0, new SystemMessage(String.join("\n\n", systemTexts)));
         }
 
-        // 工具声明：LlmRequest.tools() → ToolCallback → ToolCallingChatOptions
+        // 工具声明：ADK 工具 → Spring AI ToolCallback → ToolCallingChatOptions
         ToolCallingChatOptions opts = null;
         if (req.tools() != null && !req.tools().isEmpty()) {
             ToolConverter converter = new ToolConverter();
@@ -127,7 +137,6 @@ public class FixedSpringAI extends BaseLlm {
             if (part.text().isPresent()) {
                 text.append(part.text().get());
             } else if (part.functionResponse().isPresent()) {
-                // ★ 修复：正确转换 functionResponse → ToolResponseMessage
                 FunctionResponse fr = part.functionResponse().get();
                 String id = fr.id().orElse("");
                 String name = fr.name().orElse("");
@@ -176,17 +185,38 @@ public class FixedSpringAI extends BaseLlm {
     // ===== ChatResponse → LlmResponse =====
 
     /**
-     * 过滤 Spring AI 流式空/纯空白 chunk。
-     * 纯空白 + 无工具调用 → Spring AI meta-event 或 LLM 段落分隔。
-     * 二者在事件层无法可靠区分，但纯空白文本对后续处理无实际意义，统一过滤。
+     * 上下文感知的流式 chunk 过滤。
+     *
+     * <ul>
+     *   <li>无工具 → 纯文本 → 只过滤 null/空，保留段落分隔</li>
+     *   <li>有工具 → 前 2 个纯空白 chunk 可能是真实段落分隔，保留；
+     *       连续第 3 个起是 Spring AI artifact，过滤</li>
+     *   <li>出现非空白 chunk 时，连续计数器重置</li>
+     * </ul>
      */
-    private boolean isNotEmpty(ChatResponse cr) {
+    private static boolean isNotEmpty(ChatResponse cr, boolean hasTools, AtomicInteger consecutiveWs) {
         if (cr == null || cr.getResults().isEmpty()) return false;
         AssistantMessage am = cr.getResult().getOutput();
+
+        // tool call chunk 始终保留，重置计数器
+        if (!am.getToolCalls().isEmpty()) {
+            consecutiveWs.set(0);
+            return true;
+        }
+
         String text = am.getText();
-        boolean hasText = text != null && !text.trim().isEmpty();
-        boolean hasTools = !am.getToolCalls().isEmpty();
-        return hasText || hasTools;
+        if (text == null || text.isEmpty()) return false;
+
+        if (hasTools && text.trim().isEmpty()) {
+            int count = consecutiveWs.incrementAndGet();
+            // 前 2 个纯空白可能是真实段落分隔（如 \n\n## 标题），保留
+            // 第 3 个起是 Spring AI tool-mode artifact，过滤
+            return count <= 2;
+        }
+
+        // 非空白内容 → 重置计数器
+        consecutiveWs.set(0);
+        return true;
     }
 
     private LlmResponse toLlmResponse(ChatResponse cr) {
