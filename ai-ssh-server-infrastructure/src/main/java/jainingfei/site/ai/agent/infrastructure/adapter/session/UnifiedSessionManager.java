@@ -206,12 +206,6 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             throw new IllegalStateException("SSH 连接未建立: " + connectionId);
         }
 
-        // 如果 TerminalSession 存在，通知 WebSocket（终端能看到 AI 操作）
-        var session = sessions.get(connectionId);
-        if (session != null && !session.isClosed()) {
-            session.notifyListeners("\r\n🤖 " + command + "\r\n");
-        }
-
         ChannelExec channel = null;
         try {
             channel = (ChannelExec) jschSession.openChannel("exec");
@@ -223,17 +217,11 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
             channel.setOutputStream(out);
             channel.connect(10_000);
 
-            // 等待执行完成
             while (!channel.isClosed()) {
                 try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
 
             String result = out.toString(StandardCharsets.UTF_8);
-
-            if (session != null && !session.isClosed()) {
-                session.notifyListeners(result);
-                if (!result.endsWith("\n")) session.notifyListeners("\r\n");
-            }
 
             log.debug("[EXEC] connectionId={} command={} outputLen={}", connectionId, command, result.length());
             return result.trim();
