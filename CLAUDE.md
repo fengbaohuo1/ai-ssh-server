@@ -27,6 +27,12 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 - [SSH 领域 DDD 分层落地.md](D:\study\notes\ai-ssh\SSH%20领域%20DDD%20分层落地.md) — 聚合设计、仓库/端口接口隔离、调用链路、踩坑记录
 - [人机共用终端——统一会话层设计与实现.md](D:\study\notes\ai-ssh\人机共用终端——统一会话层设计与实现.md) — WebSocket 和 AI 工具合并为一条终端通路，Marker 输出检测，写入锁
 
+## AI Agent 踩坑记录
+
+详细总结见 `D:\study\notes\ai-ssh\`：
+- [空参数函数调用问题排查与修复.md](D:\study\notes\ai-ssh\空参数函数调用问题排查与修复.md) — FixedSpringAI 中 `Map.toString()` 产生非法 JSON，污染对话历史导致 LLM 空调用
+- [SSE 流式换行碎片问题排查与修复.md](D:\study\notes\ai-ssh\SSE流式换行碎片问题排查与修复.md) — Spring AI 流式 meta-event 产生 `\n\n` 碎片，前端 `norm()` 密度规整缓解
+
 ### 核心 API
 
 | 方法 | 端点 | 说明 |
