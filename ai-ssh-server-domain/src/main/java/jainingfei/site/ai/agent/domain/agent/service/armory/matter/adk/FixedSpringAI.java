@@ -174,25 +174,15 @@ public class FixedSpringAI extends BaseLlm {
     // ===== ChatResponse → LlmResponse =====
 
     /**
-     * 过滤 Spring AI 流式中的空/纯空白 chunk。
-     * 纯空白（\n\n）且 completionTokens=0 → Spring AI 内部 meta-event，丢弃。
-     * 纯空白（\n\n）且 completionTokens>0 → LLM 真实段落分隔，保留。
+     * 过滤 Spring AI 流式的完全空 chunk（没有任何内容也没有工具调用）。
+     * 不过滤纯空白文本（如 \n\n）——流式模式下无法用 token 数可靠区分 Spring AI meta-event 和 LLM 段落分隔，
+     * 换行规整交给前端 norm() 函数。
      */
     private boolean isNotEmpty(ChatResponse cr) {
         if (cr == null || cr.getResults().isEmpty()) return false;
         AssistantMessage am = cr.getResult().getOutput();
-        String text = am.getText();
-        boolean hasText = text != null && !text.isEmpty();
+        boolean hasText = am.getText() != null && !am.getText().isEmpty();
         boolean hasTools = !am.getToolCalls().isEmpty();
-
-        // 纯空白 + 无 tool call：检查是否 Spring AI meta-event
-        if (!hasTools && hasText && text.trim().isEmpty()) {
-            var usage = cr.getMetadata() != null ? cr.getMetadata().getUsage() : null;
-            if (usage != null) {
-                // completionTokens=0 → Spring AI 内部 meta-event，丢弃
-                if (usage.getCompletionTokens() == 0) return false;
-            }
-        }
         return hasText || hasTools;
     }
 
