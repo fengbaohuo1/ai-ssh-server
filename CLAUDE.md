@@ -32,7 +32,8 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 详细总结见 `D:\study\notes\ai-ssh\`：
 - [空参数函数调用问题排查与修复.md](D:\study\notes\ai-ssh\空参数函数调用问题排查与修复.md) — 4 轮排查（来源确认→工具防御→架构改动→根因），最终定位 `FixedSpringAI` 中 `Map.toString()` 产生非法 JSON
 - [SSE 流式换行碎片问题排查与修复.md](D:\study\notes\ai-ssh\SSE流式换行碎片问题排查与修复.md) — 5 轮排查（ADK→SpringAI→后端过滤→前端渲染→优化），Spring AI 流式 meta-event，前端 `norm()` 密度规整缓解
-- 相关架构改动：ChannelExec 替代 ChannelShell（AI 通道）、删除手动历史嵌入、双缓冲+prompt 检测（参考教学项目）
+- [终端方案对比——ChannelShell vs ChannelExec](D:\study\notes\ai-ssh\终端方案对比——ChannelShell%20vs%20ChannelExec.md) — 三种方案演变（marker → 双缓冲+prompt → ChannelExec），教学项目参考
+- 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉
 
 ### 核心 API
 
