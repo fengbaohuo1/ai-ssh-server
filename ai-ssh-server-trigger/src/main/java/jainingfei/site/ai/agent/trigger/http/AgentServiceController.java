@@ -1,13 +1,10 @@
 package jainingfei.site.ai.agent.trigger.http;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.adk.events.Event;
-import com.google.genai.types.FunctionCall;
-import com.google.genai.types.FunctionResponse;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.api.IAgentService;
 import jainingfei.site.ai.agent.api.dto.*;
 import jainingfei.site.ai.agent.api.response.Response;
+import jainingfei.site.ai.agent.cases.react.IAIAgentReActServiceCase;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
@@ -17,9 +14,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -33,10 +28,11 @@ import java.util.stream.Collectors;
 @CrossOrigin(origins = "*")
 public class AgentServiceController implements IAgentService {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
     @Resource
     private IChatService chatService;
+
+    @Resource
+    private IAIAgentReActServiceCase reactServiceCase;
 
     @RequestMapping(value = "query_ai_agent_config_list", method = RequestMethod.GET)
     @Override
@@ -85,17 +81,13 @@ public class AgentServiceController implements IAgentService {
 
             List<String> outputs = chatService.handleMessage(dto.getAgentId(), dto.getUserId(), sid, dto.getMessage());
             StringBuilder text = new StringBuilder();
-            List<String> steps = new ArrayList<>();
             for (String o : outputs) {
-                if (o.startsWith("Function Call:") || o.startsWith("Function Response:")) {
-                    steps.add(parseStep(o));
-                } else if (!o.isEmpty()) {
+                if (!o.startsWith("Function Call:") && !o.startsWith("Function Response:") && !o.isEmpty()) {
                     text.append(o);
                 }
             }
             ChatResponseDTO resp = new ChatResponseDTO();
             resp.setContent(text.toString());
-            if (!steps.isEmpty()) resp.setSteps("[" + String.join(",", steps) + "]");
             return Response.<ChatResponseDTO>builder().code(ResponseCode.SUCCESS.getCode()).info(ResponseCode.SUCCESS.getInfo()).data(resp).build();
         } catch (Exception e) {
             log.error("对话失败", e);
@@ -106,84 +98,24 @@ public class AgentServiceController implements IAgentService {
     @RequestMapping(value = "chat_stream", method = RequestMethod.POST)
     @Override
     public SseEmitter chatStream(@RequestBody ChatRequestDTO dto) {
-        SseEmitter emitter = new SseEmitter(3 * 60 * 1000L);
-        try { emitter.send(SseEmitter.event().data("{\"v\":\"\",\"s\":{\"t\":\"thinking\"}}")); } catch (Exception ignored) {}
         try {
-            chatService.handleMessageStream(
-                            dto.getAgentId(), dto.getUserId(), dto.getSessionId(), dto.getMessage(),
-                            dto.getTerminalSessionId())
-                    .subscribe(
-                            event -> sendSse(emitter, event),
-                            error -> emitter.completeWithError(error),
-                            () -> emitter.complete());
-        } catch (Exception e) { emitter.completeWithError(e); }
-        return emitter;
-    }
+            log.info("ReAct 流式对话 agentId:{} userId:{} sessionId:{} terminalSessionId:{}",
+                    dto.getAgentId(), dto.getUserId(), dto.getSessionId(), dto.getTerminalSessionId());
 
-    private void sendSse(SseEmitter emitter, Event event) {
-        try {
-            String step = buildStep(event);
-            String text = eventText(event);
-
-            if (step != null && text != null && !text.isEmpty())
-                emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + ",\"s\":[" + step + "]}"));
-            else if (step != null)
-                emitter.send(SseEmitter.event().data("{\"v\":\"\",\"s\":" + step + "}"));
-            else if (text != null && !text.isEmpty())
-                emitter.send(SseEmitter.event().data("{\"v\":" + toJson(text) + "}"));
-        } catch (Exception ignored) {}
-    }
-
-    private String buildStep(Event e) {
-        var fcs = e.functionCalls(); var frs = e.functionResponses();
-        if (fcs.isEmpty() && frs.isEmpty()) return null;
-        try {
-            Map<String, Object> step = new LinkedHashMap<>();
-            if (!fcs.isEmpty()) {
-                FunctionCall fc = fcs.get(0);
-                step.put("t", "tool_call");
-                step.put("n", fc.name().orElse(""));
-                fc.args().ifPresent(a -> step.put("a", a));
-            } else {
-                FunctionResponse fr = frs.get(0);
-                step.put("t", "tool_result");
-                step.put("n", fr.name().orElse(""));
-                fr.response().ifPresent(r -> step.put("r", r));
+            // 如果未指定 sessionId，先创建
+            if (dto.getSessionId() == null || dto.getSessionId().isEmpty()) {
+                dto.setSessionId(chatService.createSession(dto.getAgentId(), dto.getUserId()));
             }
-            return MAPPER.writeValueAsString(step);
-        } catch (Exception ex) {
-            log.warn("buildStep 异常", ex);
-            return null;
+
+            // 委托给 Case 层执行 ReAct 编排
+            return reactServiceCase.chatStream(dto);
+
+        } catch (Exception e) {
+            log.error("流式对话初始化失败", e);
+            SseEmitter emitter = new SseEmitter();
+            emitter.completeWithError(e);
+            return emitter;
         }
     }
 
-    private static final java.util.regex.Pattern TOOL_CALLS_TAG = java.util.regex.Pattern.compile("</?tool_calls>");
-
-    private String eventText(Event e) {
-        return e.content().flatMap(c -> c.parts()).map(ps -> ps.stream().filter(p -> p.text().isPresent()).map(p -> p.text().get()).reduce("", String::concat)).map(t -> TOOL_CALLS_TAG.matcher(t).replaceAll("")).orElse("");
-    }
-
-    private String parseStep(String s) {
-        if (s.startsWith("Function Call:")) {
-            String inner = s.substring("Function Call:".length()).trim();
-            return "{\"t\":\"tool_call\",\"n\":\"" + esc(field(inner, "name=")) + "\",\"a\":\"" + esc(trunc(field(inner, "args="), 200)) + "\"}";
-        }
-        if (s.startsWith("Function Response:")) {
-            String inner = s.substring("Function Response:".length()).trim();
-            return "{\"t\":\"tool_result\",\"n\":\"" + esc(field(inner, "name=")) + "\",\"r\":\"" + esc(trunc(field(inner, "response="), 500)) + "\"}";
-        }
-        return "{\"t\":\"thinking\"}";
-    }
-
-    private String field(String s, String prefix) {
-        int i = s.indexOf(prefix); if (i < 0) return "";
-        i += prefix.length(); int e = s.indexOf(',', i); if (e < 0) e = s.indexOf('}', i); if (e < 0) e = s.length();
-        String v = s.substring(i, e).trim(); while (v.endsWith("}")) v = v.substring(0, v.length() - 1).trim();
-        if (v.startsWith("Optional[")) v = v.substring("Optional[".length(), v.length() - 1);
-        return v;
-    }
-
-    private static String esc(String s) { if (s == null) return ""; return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\r", "").replace("\t", " "); }
-    private static String trunc(String s, int n) { if (s == null) return ""; return s.length() <= n ? s : s.substring(0, n) + "..."; }
-    private static String toJson(String s) { try { return MAPPER.writeValueAsString(s); } catch (Exception e) { return "\"\""; } }
 }

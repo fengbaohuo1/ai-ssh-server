@@ -11,6 +11,10 @@
 
     <packaging>jar</packaging>
 
+    <properties>
+        <skipTests>false</skipTests>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.google.adk</groupId>
@@ -126,7 +130,11 @@
             <version>2.9.0</version>
         </dependency>
 
-        <!-- 工程模块；启动依赖 trigger->domain, infrastructure-->
+        <!-- 工程模块；启动依赖 case->trigger->domain, infrastructure-->
+        <dependency>
+            <groupId>jainingfei.site</groupId>
+            <artifactId>ai-ssh-server-case</artifactId>
+        </dependency>
         <dependency>
             <groupId>jainingfei.site</groupId>
             <artifactId>ai-ssh-server-trigger</artifactId>
@@ -162,7 +170,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <skipTests>true</skipTests>
+                    <skipTests>${skipTests}</skipTests>
                     <testFailureIgnore>false</testFailureIgnore>
                     <includes>
                         <include>**/*Test.java</include>

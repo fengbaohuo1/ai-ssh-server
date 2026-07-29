@@ -10,6 +10,7 @@
     <modules>
         <module>ai-ssh-server-api</module>
         <module>ai-ssh-server-app</module>
+        <module>ai-ssh-server-case</module>
         <module>ai-ssh-server-domain</module>
         <module>ai-ssh-server-trigger</module>
         <module>ai-ssh-server-infrastructure</module>
@@ -196,6 +197,11 @@
             <dependency>
                 <groupId>jainingfei.site</groupId>
                 <artifactId>ai-ssh-server-api</artifactId>
+                <version>1.0</version>
+            </dependency>
+            <dependency>
+                <groupId>jainingfei.site</groupId>
+                <artifactId>ai-ssh-server-case</artifactId>
                 <version>1.0</version>
             </dependency>
             <dependency>

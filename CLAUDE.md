@@ -6,7 +6,7 @@ AI + SSH 的服务端项目，提供 SSH 连接的管理和操作能力。基于
 
 - **Spring Boot 4.1.0** + **MyBatis-Plus 3.5.16** + **MySQL 8.0**
 - 包名：`jainingfei.site.ai.agent`
-- 模块：api / domain / infrastructure / trigger / types / app
+- 模块：api / domain / infrastructure / trigger / types / app / case
 
 ## 总结存放要求
 
@@ -35,6 +35,7 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 - [空参数函数调用问题排查与修复.md](D:\study\notes\ai-ssh\空参数函数调用问题排查与修复.md) — 4 轮排查（来源确认→工具防御→架构改动→根因），最终定位 `FixedSpringAI` 中 `Map.toString()` 产生非法 JSON
 - [SSE 流式换行碎片问题排查与修复.md](D:\study\notes\ai-ssh\SSE流式换行碎片问题排查与修复.md) — 5 轮排查（ADK→SpringAI→后端过滤→前端渲染→优化），Spring AI 流式 meta-event，前端 `norm()` 密度规整缓解
 - [终端方案对比——ChannelShell vs ChannelExec](D:\study\notes\ai-ssh\终端方案对比——ChannelShell%20vs%20ChannelExec.md) — 三种方案演变（marker → 双缓冲+prompt → ChannelExec），教学项目参考
+- [ReAct Case 架构设计与实现](D:\study\notes\ai-ssh\ReAct%20Case%20架构设计与实现.md) — 教学项目 2-3 节落地：节点链路编排、DynamicContext、外部循环 vs ADK 内部循环、5 个 bug 从发现到修复
 - 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉
 
 ### 核心 API

@@ -38,6 +38,10 @@
         </dependency>
         <dependency>
             <groupId>jainingfei.site</groupId>
+            <artifactId>ai-ssh-server-case</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>jainingfei.site</groupId>
             <artifactId>ai-ssh-server-types</artifactId>
         </dependency>
         <dependency>

@@ -122,7 +122,11 @@ public class SshAgentMvpTest {
      * - "查看磁盘和内存使用情况"
      * - "exit" 退出
      */
-    @Test
+    /**
+     * 交互式 AI Shell 对话——需要人工输入，不适用于 CI。
+     * 使用方式：手动运行 main() 或在 IDE 中单独执行。
+     */
+    // @Test — 取消注释以手动交互测试；CI 环境不执行
     public void test_ai_shell() {
         Scanner scanner = new Scanner(System.in);
 
