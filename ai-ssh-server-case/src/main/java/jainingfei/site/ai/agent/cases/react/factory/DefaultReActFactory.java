@@ -119,6 +119,14 @@ public class DefaultReActFactory {
         private ReActResultDTO result;
 
         // ══════════════════════════════════════════════════════════
+        //  动态 Prompt 上下文（2-4 节新增）
+        // ══════════════════════════════════════════════════════════
+
+        /** 最近执行的命令记录（FIFO，最多 20 条，用于注入到动态 Prompt 中） */
+        @Builder.Default
+        private List<String> recentCommands = new ArrayList<>();
+
+        // ══════════════════════════════════════════════════════════
         //  辅助方法
         // ══════════════════════════════════════════════════════════
 
@@ -154,6 +162,15 @@ public class DefaultReActFactory {
 
         public void appendToolMessage(String toolCallId, String content) {
             appendMessage(Map.of("role", "tool", "tool_call_id", toolCallId, "content", content));
+        }
+
+        /** 记录最近执行的命令（FIFO，最多 20 条，超出淘汰最老的） */
+        public void addRecentCommand(String command) {
+            if (command == null || command.trim().isEmpty()) return;
+            recentCommands.add(command.trim());
+            while (recentCommands.size() > 20) {
+                recentCommands.remove(0);
+            }
         }
 
     }

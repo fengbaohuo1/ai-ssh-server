@@ -13,6 +13,7 @@ import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
+import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
@@ -51,6 +52,9 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
     @Resource
     private DefaultArmoryFactory defaultArmoryFactory;
 
+    @Resource
+    private IPromptService promptService;
+
     @Override
     protected ReActResultDTO doApply(ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
         log.info("ReAct AiCallNode - 开始 AI 调用，第 {} 步", ctx.getStep() + 1);
@@ -75,9 +79,19 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         // 4. 重置当前轮缓冲
         ctx.resetRoundBuffers();
 
-        // 5. 构建用户消息
+        // 5. 构建注入了动态上下文的用户消息
+        //    采集环境（uname/whoami/pwd）+ 最近命令 + 里程碑 → 拼成消息前缀
         String lastUserMessage = requestParameter.getMessage();
-        Content userContent = Content.fromParts(Part.fromText(lastUserMessage));
+
+        // 记录用户消息的里程碑（用户纠偏、任务切换等关键事件）
+        promptService.detectAndRecordMilestone(sessionId, "user", lastUserMessage);
+
+        // 构建富化消息：环境 + 最近命令 + 里程碑 → 前缀 + 原始消息
+        String enrichedMessage = promptService.buildEnrichedMessage(
+                lastUserMessage, sessionId, terminalSessionId, ctx.getRecentCommands());
+        log.debug("注入动态上下文后消息长度: {} -> {}", lastUserMessage.length(), enrichedMessage.length());
+
+        Content userContent = Content.fromParts(Part.fromText(enrichedMessage));
 
         // 6. 调用 ADK Runner 并处理事件流
         SseEmitter emitter = ctx.getEmitter();
@@ -150,6 +164,14 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                     ctx.getCurrentToolResults().add(toolResultInfo);
 
                     sendToolResultEvent(emitter, toolName, responseData);
+
+                    // 记录执行的命令到最近命令列表 + 工具结果里程碑
+                    String toolOutput = responseData instanceof String s ? s : String.valueOf(responseData);
+                    if ("executeCommand".equals(toolName) && !toolOutput.isEmpty()) {
+                        ctx.addRecentCommand(toolOutput.length() > 80
+                                ? toolOutput.substring(0, 80) + "..." : toolOutput);
+                    }
+                    promptService.detectAndRecordMilestone(sessionId, "tool", toolOutput);
                 }
 
                 // 7.3 兜底：从 stateDelta 检测（Spring AI 自动执行模式）
@@ -186,6 +208,13 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                                 sendToolResultEvent(emitter, toolName, resultContent);
                                 roundToolCalls.incrementAndGet();
                                 ctx.incrementTotalToolCalls();
+
+                                // 记录执行的命令 + 工具结果里程碑
+                                if ("executeCommand".equals(toolName) && !resultContent.isEmpty()) {
+                                    ctx.addRecentCommand(resultContent.length() > 80
+                                            ? resultContent.substring(0, 80) + "..." : resultContent);
+                                }
+                                promptService.detectAndRecordMilestone(sessionId, "tool", resultContent);
                             }
                         }
                     }

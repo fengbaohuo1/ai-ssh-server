@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 /**
  * SSH 命令执行 ADK 工具——直接继承 {@link BaseTool}。
@@ -38,6 +39,12 @@ public class SshExecuteAdkTool extends BaseTool {
 
     /** 连续空命令上限 */
     private static final int MAX_EMPTY_CALLS = 3;
+
+    /** 危险命令模式——直接拦截不执行，防止 LLM 幻觉导致系统损坏 */
+    private static final Pattern DANGEROUS_PATTERN = Pattern.compile(
+            "\\b(rm\\s+-rf\\s+/|dd\\s+if=|mkfs\\.|:\\(\\)\\s*\\{|>\\s*/dev/sd|chmod\\s+-R\\s+777\\s+/)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
 
     /** sessionId → connectionId（静态，多会话安全） */
     private static final ConcurrentHashMap<String, String> sessionConnections = new ConcurrentHashMap<>();
@@ -128,6 +135,15 @@ public class SshExecuteAdkTool extends BaseTool {
             if (!sshTerminalService.sessionExists(connectionId)) {
                 log.warn("[EXEC] 终端会话不存在: {}", connectionId);
                 return result(false, command, "SSH 终端会话不存在或已关闭: " + connectionId, null);
+            }
+
+            // 危险命令拦截
+            if (DANGEROUS_PATTERN.matcher(command).find()) {
+                log.warn("[EXEC] 危险命令被拦截: connectionId={} command={}", connectionId, command);
+                return result(false, command,
+                        "⚠️ 危险命令被拦截: " + command
+                                + "\n该命令可能导致系统损坏或数据丢失。如确需执行，请手动在终端操作。",
+                        null);
             }
 
             log.info("[EXEC] 开始SSH执行: connectionId={} command={}", connectionId, command);
