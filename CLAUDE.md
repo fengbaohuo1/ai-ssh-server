@@ -36,6 +36,7 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 - [SSE 流式换行碎片问题排查与修复.md](D:\study\notes\ai-ssh\SSE流式换行碎片问题排查与修复.md) — 5 轮排查（ADK→SpringAI→后端过滤→前端渲染→优化），Spring AI 流式 meta-event，前端 `norm()` 密度规整缓解
 - [终端方案对比——ChannelShell vs ChannelExec](D:\study\notes\ai-ssh\终端方案对比——ChannelShell%20vs%20ChannelExec.md) — 三种方案演变（marker → 双缓冲+prompt → ChannelExec），教学项目参考
 - [ReAct Case 架构设计与实现](D:\study\notes\ai-ssh\ReAct%20Case%20架构设计与实现.md) — 教学项目 2-3 节落地：节点链路编排、DynamicContext、外部循环 vs ADK 内部循环、5 个 bug 从发现到修复
+- [动态 Prompt 上下文增强——AI 装上眼睛与记性](D:\study\notes\ai-ssh\动态%20Prompt%20上下文增强——AI%20装上眼睛与记性.md) — 教学项目 2-4 节落地：环境采集 + 里程碑追踪 + 最近命令记忆 + 危险命令拦截
 - 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉
 
 ### 核心 API
