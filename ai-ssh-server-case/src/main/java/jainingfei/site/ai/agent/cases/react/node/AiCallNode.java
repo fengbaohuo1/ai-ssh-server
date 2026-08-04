@@ -1,13 +1,11 @@
 package jainingfei.site.ai.agent.cases.react.node;
 
-import com.google.adk.events.Event;
-import com.google.adk.events.EventActions;
-import com.google.adk.runner.InMemoryRunner;
 import com.google.adk.agents.RunConfig;
+import com.google.adk.events.Event;
+import com.google.adk.runner.InMemoryRunner;
 import com.google.genai.types.Content;
-import com.google.genai.types.FunctionCall;
-import com.google.genai.types.FunctionResponse;
 import com.google.genai.types.Part;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
@@ -22,32 +20,38 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import jakarta.annotation.Resource;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * AI 调用节点 — ReAct 循环的核心。
+ * AI 调用节点 — 显式 ReAct 循环的每一轮。
  *
- * <p>职责：
+ * <p>单轮模式（FixedSpringAI singleTurnMode）下，ADK 的 runAsync() 每次只跑一轮 LLM——
+ * 工具调用以 {@code <tool_calls>} 文本标签形式出现在模型输出中，不会触发 ADK 内部工具循环。
+ * 工具执行与循环推进由 Case 层显式控制。
+ *
+ * <p>每轮职责：
  * <ol>
- *   <li>从 DefaultArmoryFactory 获取 ADK Runner</li>
- *   <li>绑定 terminalSessionId 到 SshExecuteAdkTool</li>
- *   <li>调用 runner.runAsync() 获取事件流</li>
- *   <li>处理文本内容 → SSE text 事件</li>
- *   <li>双重检测工具结果：
- *     <ul>
- *       <li>ADK 标准：event.functionCalls() / event.functionResponses()</li>
- *       <li>Spring AI stateDelta：event.actions().stateDelta()（兜底）</li>
- *     </ul>
- *   </li>
- *   <li>更新步数和工具调用统计</li>
- *   <li>路由：有工具调用 → ToolCallNode，无工具调用 → LoopDecisionNode</li>
+ *   <li>富化用户消息（环境采集 + 里程碑 + 最近命令）——每轮都做，上下文递增注入</li>
+ *   <li>拼接上一轮工具执行结果（如有）</li>
+ *   <li>调用 runner.runAsync() 单轮生成</li>
+ *   <li>剥离 {@code <tool_calls>} 标签发 SSE 文本，解析标签为工具调用</li>
+ *   <li>路由：有工具调用 → ToolCallNode；无 → LoopDecisionNode</li>
  * </ol>
  */
 @Slf4j
 @Component("reactAiCallNode")
 public class AiCallNode extends AbstractAIAgentReActSupport {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** 工具调用标签块：{@code <tool_calls>...每行一个 JSON...</tool_calls>} */
+    private static final Pattern TOOL_CALLS_BLOCK =
+            Pattern.compile("<tool_calls>\\s*(.*?)\\s*</tool_calls>", Pattern.DOTALL);
 
     @Resource
     private DefaultArmoryFactory defaultArmoryFactory;
@@ -76,24 +80,32 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
             SshExecuteAdkTool.bindSession(sessionId, terminalSessionId);
         }
 
-        // 4. 重置当前轮缓冲
-        ctx.resetRoundBuffers();
+        // 3. 清空当前轮工具调用标记（防上轮残留；工具结果不清——多轮累积供 UserFeedbackNode 汇总）
+        ctx.getCurrentToolCalls().clear();
 
-        // 5. 构建注入了动态上下文的用户消息
-        //    采集环境（uname/whoami/pwd）+ 最近命令 + 里程碑 → 拼成消息前缀
+        // 4. 富化用户消息（每轮都做：环境 + 里程碑 + 最近命令 → 递增注入）
         String lastUserMessage = requestParameter.getMessage();
 
         // 记录用户消息的里程碑（用户纠偏、任务切换等关键事件）
         promptService.detectAndRecordMilestone(sessionId, "user", lastUserMessage);
 
-        // 构建富化消息：环境 + 最近命令 + 里程碑 → 前缀 + 原始消息
+        // 构建富化消息：前缀 + 原始消息 + （上一轮工具执行结果）
         String enrichedMessage = promptService.buildEnrichedMessage(
                 lastUserMessage, sessionId, terminalSessionId, ctx.getRecentCommands());
-        log.debug("注入动态上下文后消息长度: {} -> {}", lastUserMessage.length(), enrichedMessage.length());
 
-        Content userContent = Content.fromParts(Part.fromText(enrichedMessage));
+        StringBuilder fullContent = new StringBuilder(enrichedMessage);
+        String lastResult = ctx.getLastToolResultText();
+        if (lastResult != null && !lastResult.isEmpty()) {
+            fullContent.append("\n\n[上一轮工具执行结果]\n").append(lastResult);
+        }
+        // 已消费本轮工具结果——清空，本轮新执行的结果由 ToolCallNode 重新累积
+        ctx.setLastToolResultText("");
+        log.debug("本轮 LLM 输入长度: {} (原始: {}, 富化: {})",
+                fullContent.length(), lastUserMessage.length(), enrichedMessage.length());
 
-        // 6. 调用 ADK Runner 并处理事件流
+        Content userContent = Content.fromParts(Part.fromText(fullContent.toString()));
+
+        // 5. 调用 ADK Runner（单轮模式：只生成，不执行工具）
         SseEmitter emitter = ctx.getEmitter();
         StringBuilder textAccumulator = new StringBuilder();
         java.util.concurrent.atomic.AtomicInteger roundToolCalls = new java.util.concurrent.atomic.AtomicInteger(0);
@@ -103,45 +115,23 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                 ? lastUserMessage.substring(0, 200) + "..." : lastUserMessage);
 
         try {
-            // 使用 blockingForEach（与 ChatService 完全一致，已验证可行）
             runner.runAsync(
                     userId, sessionId, userContent,
                     RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build()
             ).blockingForEach(event -> {
-                // 7.1 处理文本内容
-                String text = eventText(event);
-                if (!text.isEmpty()) {
-                    textAccumulator.append(text);
-                    ctx.getAssistantContent().append(text);
-                    sendText(emitter, text, textAccumulator.toString(), null);
-                }
+                // 5.1 提取模型输出（含 <tool_calls> 标签，若模型本轮请求工具）
+                String raw = eventText(event);
+                if (raw.isEmpty()) return;
 
-                // 7.2 ADK 标准方式：从 functionCalls/functionResponses 检测工具
-                List<FunctionCall> fcs = event.functionCalls();
-                List<FunctionResponse> frs = event.functionResponses();
+                // 5.2 解析工具调用标签 → 工具调用列表
+                List<Map<String, Object>> parsedCalls = parseToolCalls(raw);
+                for (Map<String, Object> call : parsedCalls) {
+                    String toolName = call.get("name") instanceof String s ? s : "unknown";
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> args = call.get("args") instanceof Map
+                            ? (Map<String, Object>) call.get("args") : Map.of();
 
-                for (FunctionCall fc : fcs) {
-                    String toolName = fc.name().orElse("unknown");
-                    String toolCallId = "call_" + toolName + "_" + System.currentTimeMillis();
-
-                    // 只记录已注册的工具，防止 LLM 幻觉（如 "ssh"）导致死循环
-                    if (!isRegisteredTool(toolName)) {
-                        log.warn("跳过未注册的工具调用: {} — LLM 幻觉，忽略", toolName);
-                        continue;
-                    }
-
-                    Map<String, Object> args = fc.args()
-                            .filter(a -> a instanceof Map)
-                            .map(a -> {
-                                @SuppressWarnings("unchecked")
-                                Map<String, Object> m = (Map<String, Object>) a;
-                                return m;
-                            })
-                            .orElse(Map.of());
-
-                    // 记录工具调用
                     Map<String, Object> toolCallInfo = new HashMap<>();
-                    toolCallInfo.put("id", toolCallId);
                     toolCallInfo.put("name", toolName);
                     toolCallInfo.put("args", args);
                     ctx.getCurrentToolCalls().add(toolCallInfo);
@@ -149,79 +139,20 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                     sendToolCallEvent(emitter, toolName, args);
                     roundToolCalls.incrementAndGet();
                     ctx.incrementTotalToolCalls();
+                    log.info("模型请求工具: {} args={}", toolName, args);
                 }
 
-                for (FunctionResponse fr : frs) {
-                    String toolName = fr.name().orElse("unknown");
-                    String toolCallId = "call_" + toolName + "_" + System.currentTimeMillis();
-                    Object responseData = fr.response().isPresent() ? fr.response().get() : "";
-
-                    Map<String, Object> toolResultInfo = new HashMap<>();
-                    toolResultInfo.put("id", toolCallId);
-                    toolResultInfo.put("name", toolName);
-                    toolResultInfo.put("content", responseData);
-                    toolResultInfo.put("status", "success");
-                    ctx.getCurrentToolResults().add(toolResultInfo);
-
-                    sendToolResultEvent(emitter, toolName, responseData);
-
-                    // 记录执行的命令到最近命令列表 + 工具结果里程碑
-                    String toolOutput = responseData instanceof String s ? s : String.valueOf(responseData);
-                    if ("executeCommand".equals(toolName) && !toolOutput.isEmpty()) {
-                        ctx.addRecentCommand(toolOutput.length() > 80
-                                ? toolOutput.substring(0, 80) + "..." : toolOutput);
-                    }
-                    promptService.detectAndRecordMilestone(sessionId, "tool", toolOutput);
-                }
-
-                // 7.3 兜底：从 stateDelta 检测（Spring AI 自动执行模式）
-                EventActions actions = event.actions();
-                if (actions != null) {
-                    Map<String, Object> stateDelta = actions.stateDelta();
-                    if (stateDelta != null && !stateDelta.isEmpty()) {
-                        for (Map.Entry<String, Object> entry : stateDelta.entrySet()) {
-                            String stateKey = entry.getKey();
-                            Object stateValue = entry.getValue();
-                            if ("REMOVED".equals(stateValue)) continue;
-
-                            String toolName = stateKey.endsWith("_result")
-                                    ? stateKey.substring(0, stateKey.length() - 7) : stateKey;
-
-                            // stateDelta 也可能含 Spring AI 流式 phantom call，需同样过滤
-                            if (!isRegisteredTool(toolName)) {
-                                continue;
-                            }
-
-                            String toolCallId = "call_" + stateKey + "_" + System.currentTimeMillis();
-                            String resultContent = stateValue instanceof String
-                                    ? (String) stateValue : String.valueOf(stateValue);
-
-                            if (!ctx.getCurrentToolCalls().stream()
-                                    .anyMatch(tc -> toolName.equals(tc.get("name")))) {
-                                Map<String, Object> toolCallInfo = new HashMap<>();
-                                toolCallInfo.put("id", toolCallId);
-                                toolCallInfo.put("name", toolName);
-                                toolCallInfo.put("args", "");
-                                ctx.getCurrentToolCalls().add(toolCallInfo);
-
-                                sendToolCallEvent(emitter, toolName, null);
-                                sendToolResultEvent(emitter, toolName, resultContent);
-                                roundToolCalls.incrementAndGet();
-                                ctx.incrementTotalToolCalls();
-
-                                // 记录执行的命令 + 工具结果里程碑
-                                if ("executeCommand".equals(toolName) && !resultContent.isEmpty()) {
-                                    ctx.addRecentCommand(resultContent.length() > 80
-                                            ? resultContent.substring(0, 80) + "..." : resultContent);
-                                }
-                                promptService.detectAndRecordMilestone(sessionId, "tool", resultContent);
-                            }
-                        }
-                    }
+                // 5.3 剥离标签后的纯文本 → SSE text（标签不展示给前端）
+                // 注意：不能 trim——chunk 尾部的换行是模型的真实输出（表格/段落分隔），trim 会杀光换行
+                String clean = TOOL_CALLS_BLOCK.matcher(raw).replaceAll("");
+                if (!clean.isEmpty()) {
+                    textAccumulator.append(clean).append("\n");
+                    ctx.getAssistantContent().append(clean).append("\n");
+                    sendText(emitter, clean, textAccumulator.toString(), null);
                 }
             });
 
-            log.info("ADK Runner 事件流处理完成");
+            log.info("ADK Runner 本轮事件流处理完成，本轮工具请求 {} 个", roundToolCalls.get());
 
         } catch (Exception e) {
             log.error("ADK Runner 调用失败: {}", e.getMessage(), e);
@@ -230,28 +161,29 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
             ctx.setStopReason("error");
         }
 
-        // 8. 更新步数和统计
+        // 6. 更新步数和统计
         ctx.incrementStep();
         ctx.getResult().setTotalSteps(ctx.getStep());
         ctx.getResult().setTotalToolCalls(
                 ctx.getResult().getTotalToolCalls() + roundToolCalls.get()
         );
 
-        log.info("ReAct AiCallNode - 第 {} 步完成，本轮工具调用 {} 次，文本长度 {}",
+        log.info("ReAct AiCallNode - 第 {} 步完成，本轮工具请求 {} 次，文本长度 {}",
                 ctx.getStep(), roundToolCalls.get(), textAccumulator.length());
 
-        // 9. ADK 内部已完成完整 ReAct 循环，直接终止
-        if (!hasError) {
-            ctx.setStopReason("completed");
-        }
+        // 7. 路由
         return router(requestParameter, ctx);
     }
 
     @Override
     public StrategyHandler<ChatRequestDTO, DefaultReActFactory.DynamicContext, ReActResultDTO> get(
             ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
-        // ADK 内部已完成完整 ReAct 循环（LLM ↔ tool），直接走终止链路
-        log.info("ADK 内部 ReAct 已完成，路由到 LoopDecisionNode");
+        // 显式循环：有工具调用 → ToolCallNode 执行；无 → LoopDecisionNode 终止判断
+        if (!ctx.getCurrentToolCalls().isEmpty()) {
+            log.info("本轮 {} 个工具调用，路由到 ToolCallNode", ctx.getCurrentToolCalls().size());
+            return getBean("reactToolCallNode");
+        }
+        log.info("无工具调用，路由到 LoopDecisionNode");
         return getBean("reactLoopDecisionNode");
     }
 
@@ -259,7 +191,7 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
     //  辅助方法
     // ═══════════════════════════════════════════════════════════════
 
-    /** 从 Event 提取纯文本（去除 tool_calls 标签） */
+    /** 从 Event 提取文本（拼接所有 text part） */
     private static String eventText(Event e) {
         return e.content()
                 .flatMap(c -> c.parts())
@@ -267,17 +199,30 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                         .filter(p -> p.text().isPresent())
                         .map(p -> p.text().get())
                         .reduce("", String::concat))
-                .map(t -> TOOL_CALLS_TAG.matcher(t).replaceAll(""))
                 .orElse("");
     }
 
-    private static final java.util.regex.Pattern TOOL_CALLS_TAG =
-            java.util.regex.Pattern.compile("</?tool_calls>");
-
-    /** 已注册到 ADK 的工具名白名单（LLM 可能幻觉出其他名字，需过滤） */
-    private static final java.util.Set<String> REGISTERED_TOOLS = java.util.Set.of("executeCommand");
-
-    private static boolean isRegisteredTool(String toolName) {
-        return REGISTERED_TOOLS.contains(toolName);
+    /**
+     * 解析 {@code <tool_calls>} 标签块，每行一个 JSON：{@code {"name":..., "args":{...}}}。
+     * 解析失败的标签行丢弃（记录 warn）——模型输出格式不稳时不影响主流程。
+     */
+    private static List<Map<String, Object>> parseToolCalls(String raw) {
+        List<Map<String, Object>> calls = new ArrayList<>();
+        Matcher matcher = TOOL_CALLS_BLOCK.matcher(raw);
+        while (matcher.find()) {
+            String body = matcher.group(1).trim();
+            for (String line : body.split("\n")) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> call = MAPPER.readValue(line, Map.class);
+                    calls.add(call);
+                } catch (Exception e) {
+                    log.warn("解析工具调用 JSON 失败，已丢弃: {}", line);
+                }
+            }
+        }
+        return calls;
     }
 }

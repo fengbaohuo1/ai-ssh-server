@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * ADK Spring AI 适配器——Spring AI 做 LLM 通信，ADK 做工具编排。
@@ -37,6 +38,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 工具流：
  *   toPrompt(): ADK 工具 → ToolConverter → Spring AI ToolCallback → LLM（原生 function calling）
  *   toLlmResponse(): Spring AI ChatResponse → ADK LlmResponse（文本 + FunctionCall parts）
+ *
+ * 单轮模式（singleTurnMode=true）：
+ *   工具调用不转成 ADK FunctionCall part，改为 &lt;tool_calls&gt; 文本标签——
+ *   ADK 看不到 function call，每次 runAsync() 只跑一轮 LLM。
+ *   工具执行与循环推进由 Case 层（显式 ReAct 编排）接管。
  *
  * \n\n 处理：
  *   isNotEmpty() 上下文感知——流中已出现 tool call 后过滤纯空白 chunk（artifact），
@@ -50,10 +56,18 @@ public class FixedSpringAI extends BaseLlm {
     private final ChatModel chatModel;
     private final StreamingChatModel streamingChatModel;
 
+    /** 单轮模式：工具调用以 &lt;tool_calls&gt; 文本标签输出，不触发 ADK 内部工具循环 */
+    private final boolean singleTurnMode;
+
     public FixedSpringAI(ChatModel chatModel) {
+        this(chatModel, false);
+    }
+
+    public FixedSpringAI(ChatModel chatModel, boolean singleTurnMode) {
         super(extractModelName(chatModel));
         this.chatModel = chatModel;
         this.streamingChatModel = chatModel instanceof StreamingChatModel ? (StreamingChatModel) chatModel : null;
+        this.singleTurnMode = singleTurnMode;
     }
 
     @Override
@@ -62,11 +76,21 @@ public class FixedSpringAI extends BaseLlm {
             Prompt prompt = toPrompt(req);
             if (stream && streamingChatModel != null) {
                 boolean hasTools = req.tools() != null && !req.tools().isEmpty();
-                AtomicInteger consecutiveWs = new AtomicInteger(0);
 
+                if (hasTools) {
+                    // 工具模式：空白 chunk 缓冲合并。
+                    // 真实换行（Markdown 表格/段落的分隔）是独立空白 chunk——缓冲后随下一文本 chunk
+                    // 一起发出，完整保留；工具调用 chunk 到达时丢弃缓冲（phantom 空白过滤）。
+                    AtomicReference<String> pendingWs = new AtomicReference<>("");
+                    return Flowable.fromPublisher(streamingChatModel.stream(prompt))
+                            .flatMap(cr -> mergeWhitespace(cr, pendingWs))
+                            .map(this::toLlmResponse);
+                }
+
+                // 无工具模式：只过滤 null/空，保留段落分隔
                 return Flowable.fromPublisher(
                         streamingChatModel.stream(prompt)
-                                .filter(cr -> isNotEmpty(cr, hasTools, consecutiveWs))
+                                .filter(FixedSpringAI::isNotEmpty)
                                 .map(this::toLlmResponse));
             }
             ChatResponse resp = chatModel.call(prompt);
@@ -185,38 +209,57 @@ public class FixedSpringAI extends BaseLlm {
     // ===== ChatResponse → LlmResponse =====
 
     /**
-     * 上下文感知的流式 chunk 过滤。
+     * 工具模式空白缓冲合并——替代旧的"连续空白计数过滤"。
      *
+     * <p>旧策略保留前 2 个空白 chunk，误杀真实换行（Markdown 表格/多行文本的换行
+     * 也是独立空白 chunk，数量远超 2）；本策略改为：
      * <ul>
-     *   <li>无工具 → 纯文本 → 只过滤 null/空，保留段落分隔</li>
-     *   <li>有工具 → 前 2 个纯空白 chunk 可能是真实段落分隔，保留；
-     *       连续第 3 个起是 Spring AI artifact，过滤</li>
-     *   <li>出现非空白 chunk 时，连续计数器重置</li>
+     *   <li>空白 chunk → 缓冲（不发），等下一个文本 chunk</li>
+     *   <li>文本 chunk → 缓冲的空白 + 文本合并发出（真实换行完整保留）</li>
+     *   <li>工具调用 chunk / 流结束 → 丢弃缓冲（phantom 空白过滤）</li>
      * </ul>
+     * 真实换行保留与 phantom 过滤兼得，不依赖 phantom 的具体位置。
      */
-    private static boolean isNotEmpty(ChatResponse cr, boolean hasTools, AtomicInteger consecutiveWs) {
-        if (cr == null || cr.getResults().isEmpty()) return false;
+    private static Flowable<ChatResponse> mergeWhitespace(ChatResponse cr, AtomicReference<String> pendingWs) {
+        if (cr == null || cr.getResults().isEmpty()) return Flowable.empty();
         AssistantMessage am = cr.getResult().getOutput();
 
-        // tool call chunk 始终保留，重置计数器
+        // 工具调用 chunk：丢弃缓冲的空白（phantom），直接发出
         if (!am.getToolCalls().isEmpty()) {
-            consecutiveWs.set(0);
-            return true;
+            pendingWs.set("");
+            return Flowable.just(cr);
         }
 
         String text = am.getText();
-        if (text == null || text.isEmpty()) return false;
+        if (text == null || text.isEmpty()) return Flowable.empty();
 
-        if (hasTools && text.trim().isEmpty()) {
-            int count = consecutiveWs.incrementAndGet();
-            // 前 2 个纯空白可能是真实段落分隔（如 \n\n## 标题），保留
-            // 第 3 个起是 Spring AI tool-mode artifact，过滤
-            return count <= 2;
+        // 纯空白 chunk：缓冲，等待下一个文本 chunk 合并
+        if (text.trim().isEmpty()) {
+            pendingWs.set(pendingWs.get() + text);
+            return Flowable.empty();
         }
 
-        // 非空白内容 → 重置计数器
-        consecutiveWs.set(0);
-        return true;
+        // 文本 chunk：合并缓冲的空白后发出
+        String combined = pendingWs.get() + text;
+        pendingWs.set("");
+        return Flowable.just(withText(cr, combined));
+    }
+
+    /** 构造带合并文本的 ChatResponse（文本 chunk 无 toolCalls，安全复制） */
+    private static ChatResponse withText(ChatResponse cr, String text) {
+        AssistantMessage am = AssistantMessage.builder().content(text).build();
+        return ChatResponse.builder()
+                .generations(List.of(new org.springframework.ai.chat.model.Generation(am)))
+                .metadata(cr.getMetadata())
+                .build();
+    }
+
+    /** 无工具模式过滤：只过滤 null/空，保留段落分隔 */
+    private static boolean isNotEmpty(ChatResponse cr) {
+        if (cr == null || cr.getResults().isEmpty()) return false;
+        AssistantMessage am = cr.getResult().getOutput();
+        String text = am.getText();
+        return text != null && !text.isEmpty();
     }
 
     private LlmResponse toLlmResponse(ChatResponse cr) {
@@ -225,6 +268,24 @@ public class FixedSpringAI extends BaseLlm {
         }
         AssistantMessage am = cr.getResult().getOutput();
         String rawText = am.getText();
+
+        // 单轮模式：工具调用转 <tool_calls> 文本标签（每行一个 JSON），不生成 FunctionCall part。
+        // ADK 看不到 function call → 本次 runAsync() 一轮即止，工具执行由 Case 层显式接管。
+        if (singleTurnMode && !am.getToolCalls().isEmpty()) {
+            StringBuilder text = new StringBuilder(rawText == null ? "" : rawText);
+            text.append("\n<tool_calls>\n");
+            for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
+                if ("function".equals(tc.type())) {
+                    // tc.arguments() 已是合法 JSON 字符串（Spring AI 解析产物），直接嵌入
+                    text.append("{\"name\":\"").append(tc.name())
+                            .append("\",\"args\":").append(tc.arguments()).append("}\n");
+                }
+            }
+            text.append("</tool_calls>\n");
+            return LlmResponse.builder()
+                    .content(Content.builder().role("model").parts(List.of(Part.fromText(text.toString()))).build())
+                    .build();
+        }
 
         List<Part> parts = new ArrayList<>();
         if (rawText != null && !rawText.isEmpty()) {

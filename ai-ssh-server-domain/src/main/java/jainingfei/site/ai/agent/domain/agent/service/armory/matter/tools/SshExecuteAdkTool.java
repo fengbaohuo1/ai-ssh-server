@@ -131,6 +131,32 @@ public class SshExecuteAdkTool extends BaseTool {
         // 收到有效命令，重置空调用计数器
         emptyCallCounters.remove(connectionId);
 
+        return doExecute(sessionId, connectionId, command);
+    }
+
+    /**
+     * 公共执行入口——显式 ReAct 编排模式下由 ToolCallNode 直接调用（无 ADK ToolContext）。
+     *
+     * <p>与 {@link #runAsync} 路径共用 {@link #doExecute}，连接检查、危险命令拦截、
+     * 执行逻辑完全一致。sessionId 由调用方（Case 层）显式传入。
+     *
+     * @param sessionId ADK 会话 ID（工具绑定 map 的 key）
+     * @param command   要执行的 Shell 命令
+     * @return 执行结果
+     */
+    public Map<String, Object> executeCommand(String sessionId, String command) {
+        log.debug("[EXEC:public] sessionId={} command='{}'", sessionId, command);
+
+        String connectionId = sessionConnections.get(sessionId);
+        if (connectionId == null || connectionId.isEmpty()) {
+            log.warn("[EXEC:public] 未绑定 SSH 连接 → 返回提示");
+            return result(true, command, "未绑定 SSH 终端会话。请先选择一台已连接的服务器。", null);
+        }
+        return doExecute(sessionId, connectionId, command);
+    }
+
+    /** 共用执行体：连接检查 → 危险命令拦截 → 执行 → 结果组装 */
+    private Map<String, Object> doExecute(String sessionId, String connectionId, String command) {
         try {
             if (!sshTerminalService.sessionExists(connectionId)) {
                 log.warn("[EXEC] 终端会话不存在: {}", connectionId);

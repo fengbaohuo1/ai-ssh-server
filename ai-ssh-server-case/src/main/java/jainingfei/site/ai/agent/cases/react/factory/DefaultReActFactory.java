@@ -126,6 +126,10 @@ public class DefaultReActFactory {
         @Builder.Default
         private List<String> recentCommands = new ArrayList<>();
 
+        /** 上一轮工具执行结果（格式化文本）——显式循环下注入下一轮 userContent，让模型看到工具干了什么 */
+        @Builder.Default
+        private String lastToolResultText = "";
+
         // ══════════════════════════════════════════════════════════
         //  辅助方法
         // ══════════════════════════════════════════════════════════
