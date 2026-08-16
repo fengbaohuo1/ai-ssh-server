@@ -61,7 +61,10 @@ public class RootNode extends AbstractAIAgentReActSupport {
         ctx.setAgentId(agentId);
         ctx.setTerminalSessionId(terminalSessionId);
 
-        // 4. 初始化结果 DTO
+        // 4.1 记录原始用户任务（防长对话任务漂移，TaskProvider 的数据源之一）
+        ctx.setOriginalUserTask(message);
+
+        // 4.2 初始化结果 DTO
         ReActResultDTO result = ReActResultDTO.builder()
                 .totalSteps(0)
                 .totalToolCalls(0)

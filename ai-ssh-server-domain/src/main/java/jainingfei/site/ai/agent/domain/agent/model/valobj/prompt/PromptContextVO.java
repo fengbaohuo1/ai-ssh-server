@@ -6,10 +6,11 @@ import lombok.Data;
 import java.util.List;
 
 /**
- * 动态 Prompt 上下文值对象——承载环境信息、最近命令、里程碑事件三类动态上下文。
+ * 动态 Prompt 上下文值对象——承载环境信息、最近命令、里程碑事件、
+ * 当前任务、工具执行摘要五类动态上下文。
  *
- * <p>由 {@code PromptService.buildPromptContext()} 组装，供
- * {@code DynamicPromptBuilder} 翻译为结构化消息前缀。
+ * <p>由 {@code ChatContextService.buildPromptContext()} 聚合各 ContextProvider
+ * 的输出组装，供 {@code DynamicPromptBuilder} 翻译为结构化消息前缀。
  */
 @Data
 @Builder
@@ -32,4 +33,10 @@ public class PromptContextVO {
 
     /** 最近里程碑事件（最多 10 条） */
     private List<MilestoneVO> milestoneVOS;
+
+    /** 工具执行摘要——会话级缓存，跨轮次/跨对话回顾"之前执行过什么" */
+    private String toolResultSummary;
+
+    /** 当前任务描述（首条用户消息）——防长对话任务漂移 */
+    private String taskDescription;
 }

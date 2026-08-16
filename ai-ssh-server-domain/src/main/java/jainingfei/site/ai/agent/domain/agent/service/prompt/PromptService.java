@@ -1,16 +1,18 @@
 package jainingfei.site.ai.agent.domain.agent.service.prompt;
 
-import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.MilestoneVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.PromptContextVO;
+import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.prompt.dynamic.DynamicPromptBuilder;
 import jainingfei.site.ai.agent.domain.agent.service.prompt.dynamic.MilestoneTracker;
-import jainingfei.site.ai.agent.domain.ssh.service.ISshTerminalService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.Resource;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 提示词领域服务实现——收口动态 Prompt 构建的全部能力。
@@ -19,7 +21,7 @@ import java.util.List;
  * <ul>
  *   <li>{@link DynamicPromptBuilder} —— 组装结构化消息前缀</li>
  *   <li>{@link MilestoneTracker} —— 检测并缓存关键事件</li>
- *   <li>{@link ISshTerminalService} —— SSH 终端通道，采集远程环境信息</li>
+ *   <li>{@link IChatContextService} —— 聚合各 ContextProvider（环境 / 任务 / 里程碑 / 工具摘要）</li>
  * </ul>
  *
  * <p>Case 层只依赖 {@link IPromptService} 接口，不接触内部组件。
@@ -35,7 +37,7 @@ public class PromptService implements IPromptService {
     private MilestoneTracker milestoneTracker;
 
     @Resource
-    private ISshTerminalService sshTerminalService;
+    private IChatContextService chatContextService;
 
     @Override
     public void detectAndRecordMilestone(String sessionId, String role, String content) {
@@ -43,10 +45,13 @@ public class PromptService implements IPromptService {
     }
 
     @Override
-    public String buildEnrichedMessage(String userMessage, String sessionId,
-                                        String terminalSessionId, List<String> recentCommands) {
-        // 1. 从 SSH 终端采集环境信息 + 取里程碑 → 组装 PromptContextVO
-        PromptContextVO promptContextVO = buildPromptContext(sessionId, terminalSessionId, recentCommands);
+    public String buildEnrichedMessage(String userMessage, String sessionId, String userId,
+                                       String terminalSessionId, List<String> recentCommands,
+                                       List<Map<String, Object>> messageHistory) {
+        // 1. 聚合各 ContextProvider（环境 / 任务 / 里程碑 / 工具摘要）→ PromptContextVO
+        PromptContextVO promptContextVO = chatContextService.buildPromptContext(
+                sessionId, userId, terminalSessionId, messageHistory);
+        promptContextVO.setRecentCommands(recentCommands);
 
         // 2. 生成消息前缀
         String prefix = dynamicPromptBuilder.buildMessagePrefix(promptContextVO);
@@ -59,67 +64,41 @@ public class PromptService implements IPromptService {
     }
 
     @Override
+    public String buildIncrementalPrefix(String sessionId, long sinceMilestoneTs,
+                                         List<String> recentCommands, int sinceCommandCount) {
+        StringBuilder sb = new StringBuilder();
+        boolean hasContent = false;
+
+        // 1. 新增命令（第 1 轮已全量注入过前 sinceCommandCount 条，只取之后的增量）
+        if (recentCommands != null && sinceCommandCount < recentCommands.size()) {
+            sb.append("[本轮新增命令]\n");
+            for (int i = sinceCommandCount; i < recentCommands.size(); i++) {
+                sb.append("- ").append(recentCommands.get(i)).append("\n");
+            }
+            hasContent = true;
+        }
+
+        // 2. 新增里程碑（按时间戳水位过滤；取全量 50 条上限，避免 getRecent(10) 截断漏掉增量）
+        List<MilestoneVO> freshMilestones = new ArrayList<>();
+        for (MilestoneVO m : milestoneTracker.getRecent(sessionId, 50)) {
+            if (m.getTimestamp() > sinceMilestoneTs) {
+                freshMilestones.add(m);
+            }
+        }
+        if (!freshMilestones.isEmpty()) {
+            if (hasContent) sb.append("\n");
+            sb.append("[新增关键事件]\n");
+            for (MilestoneVO m : freshMilestones) {
+                sb.append("- [").append(m.getType().name()).append("] ").append(m.getContent()).append("\n");
+            }
+            hasContent = true;
+        }
+
+        return hasContent ? sb.toString() : "";
+    }
+
+    @Override
     public void clearMilestones(String sessionId) {
         milestoneTracker.clear(sessionId);
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  环境采集
-    // ═══════════════════════════════════════════════════════════════
-
-    /**
-     * 构建动态 Prompt 上下文值对象。
-     *
-     * <p>通过 SSH 终端实时采集三类环境信息：
-     * <ul>
-     *   <li>{@code uname -srm} → osInfo（操作系统+架构+内核版本）</li>
-     *   <li>{@code whoami} → currentUser（当前登录用户）</li>
-     *   <li>{@code pwd} → currentDirectory（当前工作目录）</li>
-     * </ul>
-     *
-     * <p>工程细节：
-     * <ul>
-     *   <li>使用 {@code execCommand}（ChannelExec）而非 {@code executeCommand}（ChannelShell），
-     *       环境采集是一次性命令，ChannelExec 无回显/ANSI/prompt 污染</li>
-     *   <li>每条采集命令独立 try-catch——环境采集是"锦上添花"非"必需成功"，失败留空不阻塞主流程</li>
-     * </ul>
-     *
-     * @param sessionId          对话会话 ID（传给 MilestoneTracker）
-     * @param terminalSessionId  SSH 终端会话 ID（即 connectionId），为 null 或空时跳过环境采集
-     * @param recentCommands     最近执行的命令列表
-     * @return 组装完成的动态上下文值对象
-     */
-    private PromptContextVO buildPromptContext(String sessionId, String terminalSessionId,
-                                               List<String> recentCommands) {
-        String osInfo = "";
-        String currentUser = "";
-        String currentDirectory = "";
-
-        if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
-            osInfo = safeExec(terminalSessionId, "uname -srm");
-            currentUser = safeExec(terminalSessionId, "whoami");
-            currentDirectory = safeExec(terminalSessionId, "pwd");
-        }
-
-        List<MilestoneVO> milestoneVOS = milestoneTracker.getRecent(sessionId, 10);
-
-        return PromptContextVO.builder()
-                .osInfo(osInfo)
-                .currentUser(currentUser)
-                .currentDirectory(currentDirectory)
-                .recentCommands(recentCommands)
-                .milestoneVOS(milestoneVOS)
-                .build();
-    }
-
-    /** 安全执行采集命令——失败返回空串，不抛异常 */
-    private String safeExec(String terminalSessionId, String command) {
-        try {
-            String raw = sshTerminalService.execCommand(terminalSessionId, command);
-            return raw != null ? raw.trim() : "";
-        } catch (Exception e) {
-            log.debug("环境采集失败: command={}, error={}", command, e.getMessage());
-            return "";
-        }
     }
 }

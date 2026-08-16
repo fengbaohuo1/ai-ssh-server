@@ -2,7 +2,7 @@ package jainingfei.site.ai.agent.domain.agent.service.chat;
 
 import com.google.adk.agents.RunConfig;
 import com.google.adk.events.Event;
-import com.google.adk.runner.InMemoryRunner;
+import com.google.adk.runner.Runner;
 import com.google.adk.sessions.Session;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
@@ -64,7 +64,7 @@ public class ChatService implements IChatService {
         }
 
         String appName = aiAgentRegisterVO.getAppName();
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
 
         String sessionId = userSessions.computeIfAbsent(userId, uid -> {
             Session session = runner.sessionService().createSession(appName, uid)
@@ -92,7 +92,7 @@ public class ChatService implements IChatService {
             throw new AppException(ResponseCode.E0001.getCode());
         }
 
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
         sessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
         Content userMsg = Content.fromParts(Part.fromText(message));
@@ -111,7 +111,7 @@ public class ChatService implements IChatService {
             throw new AppException(ResponseCode.E0001.getCode());
         }
 
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
         // ADK 的 InMemorySessionService 自动管理对话历史
@@ -127,7 +127,7 @@ public class ChatService implements IChatService {
             throw new AppException(ResponseCode.E0001.getCode());
         }
 
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
         // 将 SSH 连接 ID 设置到静态字段，供 SshExecuteAdkTool 在 ADK 线程中读取
@@ -192,7 +192,7 @@ public class ChatService implements IChatService {
 
         Content content = Content.builder().role("user").parts(parts).build();
 
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
         Flowable<Event> events = runner.runAsync(chatCommandEntity.getUserId(), sessionId, content,
                 RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
         List<String> outputs = new ArrayList<>();
@@ -204,7 +204,7 @@ public class ChatService implements IChatService {
      * 校验 session 是否仍然存在（重启后 InMemorySessionService 会清空），
      * 如果已失效则自动创建新 session 并更新缓存。
      */
-    private String ensureSessionExists(InMemoryRunner runner, String appName, String userId, String sessionId) {
+    private String ensureSessionExists(Runner runner, String appName, String userId, String sessionId) {
         Session session = runner.sessionService().getSession(appName, userId, sessionId,
                         java.util.Optional.empty()).blockingGet();
         if (session == null) {

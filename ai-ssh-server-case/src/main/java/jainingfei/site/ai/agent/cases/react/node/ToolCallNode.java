@@ -4,6 +4,7 @@ import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
+import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
@@ -45,6 +46,9 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
 
     @Resource
     private IPromptService promptService;
+
+    @Resource
+    private IChatContextService chatContextService;
 
     @Override
     protected ReActResultDTO doApply(ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
@@ -91,12 +95,24 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
             // 记录工具结果里程碑（工具报错等关键事件）
             promptService.detectAndRecordMilestone(sessionId, "tool", resultText);
 
-            // 存储工具结果（累积，UserFeedbackNode 汇总）
+            // 推送工具结果到会话级缓存（ToolResultProvider 生成摘要，供下一轮 Prompt 注入）
+            chatContextService.pushToolResult(sessionId, toolName, resultText);
+
+            // 存储工具结果（累积，UserFeedbackNode 汇总；id 与 assistant tool_calls 配对）
             Map<String, Object> toolResultInfo = new HashMap<>();
+            Object callId = call.get("id");
+            if (callId != null) {
+                toolResultInfo.put("id", callId);
+            }
             toolResultInfo.put("name", toolName);
             toolResultInfo.put("content", resultText);
             toolResultInfo.put("status", "success");
             ctx.getCurrentToolResults().add(toolResultInfo);
+
+            // 写入业务侧历史（tool 消息，与 assistant 的 tool_calls 同组，供裁剪器完整保留）
+            if (callId != null) {
+                ctx.appendToolMessage(String.valueOf(callId), resultText);
+            }
 
             // 结果回灌下一轮：命令 + 输出（多条命令累积——覆盖会导致 LLM 只见最后一条）
             String roundResult = "$ " + command + "\n" + resultText;

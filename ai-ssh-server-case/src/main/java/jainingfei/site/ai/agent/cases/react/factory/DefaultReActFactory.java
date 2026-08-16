@@ -130,6 +130,17 @@ public class DefaultReActFactory {
         @Builder.Default
         private String lastToolResultText = "";
 
+        /** 已注入前缀的最近命令条数——增量注入水位（第 1 轮全量注入后记录，后续轮只注入新命令） */
+        @Builder.Default
+        private int injectedCommandCount = 0;
+
+        /** 已注入前缀的里程碑时间戳水位——增量注入水位（时间戳晚于该值的里程碑视为新增） */
+        @Builder.Default
+        private long injectedMilestoneTs = 0L;
+
+        /** 原始用户任务（首条用户消息原文）——防长对话任务漂移，TaskProvider 的数据源之一 */
+        private String originalUserTask;
+
         // ══════════════════════════════════════════════════════════
         //  辅助方法
         // ══════════════════════════════════════════════════════════
@@ -175,6 +186,18 @@ public class DefaultReActFactory {
             while (recentCommands.size() > 20) {
                 recentCommands.remove(0);
             }
+        }
+
+        /**
+         * 标记本轮富化已注入——更新增量注入水位。
+         *
+         * <p>调用时机：每次 buildEnrichedMessage / buildIncrementalPrefix 之后。
+         * 命令水位取当前累计条数；里程碑水位取当前时间（先标记后记录的里程碑，
+         * 时间戳必然晚于水位，会在下一轮以增量形式注入）。
+         */
+        public void markEnrichmentInjected() {
+            this.injectedCommandCount = recentCommands.size();
+            this.injectedMilestoneTs = System.currentTimeMillis();
         }
 
     }

@@ -2,7 +2,7 @@ package jainingfei.site.ai.agent.cases.react.node;
 
 import com.google.adk.agents.RunConfig;
 import com.google.adk.events.Event;
-import com.google.adk.runner.InMemoryRunner;
+import com.google.adk.runner.Runner;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,6 +11,7 @@ import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
+import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
@@ -36,7 +37,7 @@ import java.util.regex.Pattern;
  *
  * <p>每轮职责：
  * <ol>
- *   <li>富化用户消息（环境采集 + 里程碑 + 最近命令）——每轮都做，上下文递增注入</li>
+ *   <li>富化用户消息——第 1 轮全量注入（环境采集 + 里程碑 + 最近命令），后续轮增量注入（新命令 + 新里程碑）</li>
  *   <li>拼接上一轮工具执行结果（如有）</li>
  *   <li>调用 runner.runAsync() 单轮生成</li>
  *   <li>剥离 {@code <tool_calls>} 标签发 SSE 文本，解析标签为工具调用</li>
@@ -59,6 +60,13 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
     @Resource
     private IPromptService promptService;
 
+    @Resource
+    private IChatContextService chatContextService;
+
+    /** 工具调用 id 序列（全局唯一，用于业务侧历史中 assistant tool_calls 与 tool 结果的配对） */
+    private static final java.util.concurrent.atomic.AtomicInteger TOOL_CALL_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+
     @Override
     protected ReActResultDTO doApply(ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
         log.info("ReAct AiCallNode - 开始 AI 调用，第 {} 步", ctx.getStep() + 1);
@@ -73,7 +81,7 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         if (registerVO == null) {
             throw new RuntimeException("Agent not found: " + agentId);
         }
-        InMemoryRunner runner = registerVO.getRunner();
+        Runner runner = registerVO.getRunner();
 
         // 2. 绑定终端会话到工具（session 已由 RootNode 通过 ChatService 创建/校验）
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
@@ -83,15 +91,34 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         // 3. 清空当前轮工具调用标记（防上轮残留；工具结果不清——多轮累积供 UserFeedbackNode 汇总）
         ctx.getCurrentToolCalls().clear();
 
-        // 4. 富化用户消息（每轮都做：环境 + 里程碑 + 最近命令 → 递增注入）
+        // 3.1 裁剪业务侧消息历史（优先级 + 滑动窗口混合策略，8000 token 预算）——
+        // 供 ContextProvider（Task/ToolResult 等）消费；框架层历史由 CustomAdkSessionService 治理
+        List<Map<String, Object>> trimmedHistory = chatContextService.trimHistory(ctx.getMessageHistory(), 8000);
+        ctx.setMessageHistory(new ArrayList<>(trimmedHistory));
+
+        // 4. 富化用户消息（每轮都做；第 1 轮全量注入，后续轮只注入增量，避免前缀重复累积）
         String lastUserMessage = requestParameter.getMessage();
 
-        // 记录用户消息的里程碑（用户纠偏、任务切换等关键事件）
-        promptService.detectAndRecordMilestone(sessionId, "user", lastUserMessage);
-
-        // 构建富化消息：前缀 + 原始消息 + （上一轮工具执行结果）
-        String enrichedMessage = promptService.buildEnrichedMessage(
-                lastUserMessage, sessionId, terminalSessionId, ctx.getRecentCommands());
+        String enrichedMessage;
+        if (ctx.getStep() == 0) {
+            // 第 1 轮：全量注入（环境信息 + 最近命令 + 历史里程碑 + 当前任务 + 工具摘要）
+            enrichedMessage = promptService.buildEnrichedMessage(
+                    lastUserMessage, sessionId, ctx.getUserId(),
+                    terminalSessionId, ctx.getRecentCommands(), ctx.getMessageHistory());
+            // 更新注入水位——必须先于记录本消息里程碑：
+            // 本消息的纠偏/切换应影响"下一轮"决策，而不是出现在它自己消息的前缀里
+            ctx.markEnrichmentInjected();
+            // 记录用户消息里程碑（仅第 1 轮：原始消息只在循环入口出现一次，
+            // 逐轮重复记录会把同一事件刷满 50 条上限，挤掉真实的工具报错事件）
+            promptService.detectAndRecordMilestone(sessionId, "user", lastUserMessage);
+        } else {
+            // 第 2 轮起：只注入新增命令 + 新增里程碑（旧前缀已在 ADK 会话历史中，不重复注入）
+            String delta = promptService.buildIncrementalPrefix(
+                    sessionId, ctx.getInjectedMilestoneTs(),
+                    ctx.getRecentCommands(), ctx.getInjectedCommandCount());
+            enrichedMessage = delta.isEmpty() ? lastUserMessage : delta + "\n---\n" + lastUserMessage;
+            ctx.markEnrichmentInjected();
+        }
 
         StringBuilder fullContent = new StringBuilder(enrichedMessage);
         String lastResult = ctx.getLastToolResultText();
@@ -132,6 +159,7 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                             ? (Map<String, Object>) call.get("args") : Map.of();
 
                     Map<String, Object> toolCallInfo = new HashMap<>();
+                    toolCallInfo.put("id", "call_" + TOOL_CALL_SEQ.incrementAndGet());
                     toolCallInfo.put("name", toolName);
                     toolCallInfo.put("args", args);
                     ctx.getCurrentToolCalls().add(toolCallInfo);
@@ -153,6 +181,17 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
             });
 
             log.info("ADK Runner 本轮事件流处理完成，本轮工具请求 {} 个", roundToolCalls.get());
+
+            // 5.4 记录 assistant 消息到业务侧历史（含工具调用标记，供裁剪器分组配对）
+            if (textAccumulator.length() > 0 || !ctx.getCurrentToolCalls().isEmpty()) {
+                Map<String, Object> assistantMsg = new HashMap<>();
+                assistantMsg.put("role", "assistant");
+                assistantMsg.put("content", textAccumulator.toString());
+                if (!ctx.getCurrentToolCalls().isEmpty()) {
+                    assistantMsg.put("tool_calls", new ArrayList<>(ctx.getCurrentToolCalls()));
+                }
+                ctx.appendMessage(assistantMsg);
+            }
 
         } catch (Exception e) {
             log.error("ADK Runner 调用失败: {}", e.getMessage(), e);

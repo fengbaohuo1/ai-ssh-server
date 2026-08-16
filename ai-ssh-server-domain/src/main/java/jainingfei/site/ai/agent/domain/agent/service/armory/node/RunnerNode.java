@@ -1,14 +1,17 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.node;
 
 import com.google.adk.agents.BaseAgent;
+import com.google.adk.artifacts.InMemoryArtifactService;
 import com.google.adk.plugins.BasePlugin;
-import com.google.adk.runner.InMemoryRunner;
+import com.google.adk.runner.Runner;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ArmoryCommandEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySupport;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.CustomAdkMemoryService;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.CustomAdkSessionService;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
 import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
@@ -16,12 +19,19 @@ import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.Resource;
 import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
 @Service
 public class RunnerNode extends AbstractArmorySupport {
+
+    @Resource
+    private CustomAdkSessionService customAdkSessionService;
+
+    @Resource
+    private CustomAdkMemoryService customAdkMemoryService;
 
 
     @Override
@@ -36,7 +46,7 @@ public class RunnerNode extends AbstractArmorySupport {
         String agentDesc = agent.getAgentDesc();
 
 
-        InMemoryRunner runner = createRunner(dynamicContext, aiAgentConfigTableVO, appName);
+        Runner runner = createRunner(dynamicContext, aiAgentConfigTableVO, appName);
         AiAgentRegisterVO aiAgentRegisterVO = AiAgentRegisterVO.builder()
                 .appName(appName)
                 .agentId(agentId)
@@ -49,7 +59,7 @@ public class RunnerNode extends AbstractArmorySupport {
         return aiAgentRegisterVO;
     }
 
-    private InMemoryRunner createRunner(DefaultArmoryFactory.DynamicContext dynamicContext, AiAgentConfigTableVO aiAgentConfigTableVO, String appName) {
+    private Runner createRunner(DefaultArmoryFactory.DynamicContext dynamicContext, AiAgentConfigTableVO aiAgentConfigTableVO, String appName) {
         AiAgentConfigTableVO.Module.Runner runnerConfig = aiAgentConfigTableVO.getModule().getRunner();
 
         String agentName = runnerConfig.getAgentName();
@@ -72,7 +82,17 @@ public class RunnerNode extends AbstractArmorySupport {
             basePlugins = List.of();
         }
 
-        return new InMemoryRunner(baseAgent, appName, basePlugins);
+        // 使用自定义 Session/Memory 服务接管框架层会话治理（2-6 节）：
+        // Session —— 净化器 + 限流器 + 修剪器（剥离动态前缀、截断长文本、限轮次限条数）
+        // Memory —— 空实现（收掉 ADK 记忆职责，避免与业务侧记忆重复）
+        return new Runner(
+                baseAgent,
+                appName,
+                new InMemoryArtifactService(),
+                customAdkSessionService,
+                customAdkMemoryService,
+                basePlugins
+        );
     }
 
     @Override

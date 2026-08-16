@@ -3,7 +3,7 @@ package jainingfei.site.ai.agent.test.app;
 
 import com.alibaba.fastjson.JSON;
 import com.google.adk.events.Event;
-import com.google.adk.runner.InMemoryRunner;
+import com.google.adk.runner.Runner;
 import com.google.adk.sessions.Session;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
@@ -29,7 +29,7 @@ public class AiAgentAutoConfigTest {
     public void test_agent() throws InterruptedException {
         AiAgentRegisterVO aiAgentRegisterVO = applicationContext.getBean("100001", AiAgentRegisterVO.class);
 
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
         String appName = aiAgentRegisterVO.getAppName();
         String userId = "jianingfei";
 
@@ -58,7 +58,7 @@ public class AiAgentAutoConfigTest {
         AiAgentRegisterVO aiAgentRegisterVO = applicationContext.getBean("100002", AiAgentRegisterVO.class);
 
         String appName = aiAgentRegisterVO.getAppName();
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
 
         Session session = runner.sessionService()
                 .createSession(appName, "jianingfei")
@@ -81,7 +81,7 @@ public class AiAgentAutoConfigTest {
         AiAgentRegisterVO aiAgentRegisterVO = applicationContext.getBean("100003", AiAgentRegisterVO.class);
 
         String appName = aiAgentRegisterVO.getAppName();
-        InMemoryRunner runner = aiAgentRegisterVO.getRunner();
+        Runner runner = aiAgentRegisterVO.getRunner();
 
         Session session = runner.sessionService()
                 .createSession(appName, "jianingfei")

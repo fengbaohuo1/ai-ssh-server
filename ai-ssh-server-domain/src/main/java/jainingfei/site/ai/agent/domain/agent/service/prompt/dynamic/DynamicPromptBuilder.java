@@ -6,8 +6,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
- * 动态 Prompt 构建器——将 {@link PromptContextVO} 中的环境信息、最近命令、里程碑事件
- * 翻译为模型可读的结构化消息前缀。
+ * 动态 Prompt 构建器——将 {@link PromptContextVO} 中的环境信息、最近命令、里程碑事件、
+ * 当前任务、工具执行摘要翻译为模型可读的结构化消息前缀。
  *
  * <p>两类构建方式：
  * <ul>
@@ -69,6 +69,13 @@ public class DynamicPromptBuilder {
             hasContent = true;
         }
 
+        // [当前任务] 段落——首条用户消息，防长对话任务漂移
+        if (!isEmpty(ctx.getTaskDescription())) {
+            if (hasContent) sb.append("\n");
+            sb.append("[当前任务]\n").append(ctx.getTaskDescription()).append("\n");
+            hasContent = true;
+        }
+
         // [关键事件] 段落
         if (ctx.getMilestoneVOS() != null && !ctx.getMilestoneVOS().isEmpty()) {
             if (hasContent) sb.append("\n");
@@ -76,6 +83,13 @@ public class DynamicPromptBuilder {
             for (MilestoneVO m : ctx.getMilestoneVOS()) {
                 sb.append("- [").append(m.getType().name()).append("] ").append(m.getContent()).append("\n");
             }
+            hasContent = true;
+        }
+
+        // [工具执行摘要] 段落——会话级工具结果回顾（跨轮次/跨对话）
+        if (!isEmpty(ctx.getToolResultSummary())) {
+            if (hasContent) sb.append("\n");
+            sb.append("[工具执行摘要]\n").append(ctx.getToolResultSummary()).append("\n");
             hasContent = true;
         }
 

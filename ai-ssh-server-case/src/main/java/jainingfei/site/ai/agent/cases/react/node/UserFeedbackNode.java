@@ -4,11 +4,14 @@ import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
+import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import jakarta.annotation.Resource;
 
 /**
  * ReAct 用户反馈节点 — 结果收口与资源清理。
@@ -26,6 +29,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 @Slf4j
 @Component("reactUserFeedbackNode")
 public class UserFeedbackNode extends AbstractAIAgentReActSupport {
+
+    @Resource
+    private IChatContextService chatContextService;
 
     @Override
     protected ReActResultDTO doApply(ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
@@ -101,6 +107,8 @@ public class UserFeedbackNode extends AbstractAIAgentReActSupport {
             if (sessionId != null) {
                 SshExecuteAdkTool.unbindSession(sessionId);
                 unbindTerminalSession(sessionId);
+                // 清理上下文缓存（工具结果摘要等），避免旧结果污染下一轮/下一对话
+                chatContextService.clearSessionContext(sessionId);
             }
             clearCurrentTerminalSession();
             log.debug("ReAct 上下文清理完成 sessionId={}", sessionId);
