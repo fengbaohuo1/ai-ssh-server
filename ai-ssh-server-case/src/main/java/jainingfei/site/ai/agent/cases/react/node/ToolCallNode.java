@@ -4,9 +4,12 @@ import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
+import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
+import jainingfei.site.ai.agent.domain.agent.service.intent.IntentService;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -49,6 +52,9 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
 
     @Resource
     private IChatContextService chatContextService;
+
+    @Resource
+    private IIntentService intentService;
 
     @Override
     protected ReActResultDTO doApply(ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
@@ -97,6 +103,11 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
 
             // 推送工具结果到会话级缓存（ToolResultProvider 生成摘要，供下一轮 Prompt 注入）
             chatContextService.pushToolResult(sessionId, toolName, resultText);
+
+            // 反馈回路：根据工具结果判定当前意图是否走偏，必要时重分类
+            // （显式循环下工具在本节点执行，故挂在这里而非 AiCallNode——教程中 ADK 内部
+            //   执行工具、结果出现在 AiCallNode 的 stateDelta，本项目位置不同但语义一致）
+            handleIntentFeedback(ctx, resultText);
 
             // 存储工具结果（累积，UserFeedbackNode 汇总；id 与 assistant tool_calls 配对）
             Map<String, Object> toolResultInfo = new HashMap<>();
@@ -194,5 +205,49 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() > max ? s.substring(0, max) + "\n... (truncated, total " + s.length() + " chars)" : s;
+    }
+
+    /**
+     * 反馈回路：根据工具执行结果判定当前意图是否需要重分类。
+     * <p>
+     * 仅在本轮已有意图识别结果时触发；reportFeedback 返回非 null 表示已重分类，
+     * 此时更新 DynamicContext 的当前意图，并置位"意图修正提示"供下一轮一次性注入。
+     * <p>
+     * 流程：
+     * <pre>
+     *   工具执行完(result)
+     *     ├─ 无本轮意图结果 → 直接返回
+     *     ├─ 判定 success（非空 && 不像意图走偏）
+     *     └─ intentService.reportFeedback(...)
+     *          ├─ 返回 null  → 维持原意图
+     *          └─ 返回新结果 → 更新 currentIntent / currentIntentResult
+     *                        → 置位 pendingIntentCorrection（下一轮 AiCallNode 注入后清空）
+     * </pre>
+     * 案例：意图 CONFIGURE，工具结果 "No such file" → success=false →
+     *       reportFeedback 用候选 MONITOR 递补 → 下一轮 Prompt 注入 "[用户意图已修正] 配置修改 → 监控查看"。
+     */
+    private void handleIntentFeedback(DefaultReActFactory.DynamicContext ctx, String toolResult) {
+        IntentResultVO lastIntent = ctx.getCurrentIntentResult();
+        if (lastIntent == null) {
+            return;
+        }
+        // 复用 IntentService 的失败特征判定，保持两处逻辑一致
+        boolean success = toolResult != null && !toolResult.isBlank()
+                && !IntentService.looksLikeIntentMismatch(toolResult);
+
+        IntentResultVO reclassified = intentService.reportFeedback(
+                ctx.getSessionId(), lastIntent, success, toolResult);
+        if (reclassified != null) {
+            log.info("反馈回路触发重分类: {} -> {} (conf={})",
+                    lastIntent.getIntent(), reclassified.getIntent(), reclassified.getConfidence());
+            ctx.setCurrentIntent(reclassified.getIntent().name());
+            ctx.setCurrentIntentResult(reclassified);
+            // 一次性注入"意图已修正"提示（消费即清空），让下一轮主模型感知意图变化
+            ctx.setPendingIntentCorrection(String.format(
+                    "[用户意图已修正] %s → %s（置信度 %.2f）",
+                    lastIntent.getIntent().getLabel(),
+                    reclassified.getIntent().getLabel(),
+                    reclassified.getConfidence()));
+        }
     }
 }

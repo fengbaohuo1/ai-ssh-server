@@ -1,6 +1,7 @@
 package jainingfei.site.ai.agent.cases.react.factory;
 
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -140,6 +141,20 @@ public class DefaultReActFactory {
 
         /** 原始用户任务（首条用户消息原文）——防长对话任务漂移，TaskProvider 的数据源之一 */
         private String originalUserTask;
+
+        // ══════════════════════════════════════════════════════════
+        //  意图识别（2-7 节新增）
+        // ══════════════════════════════════════════════════════════
+
+        /** 当前意图名称（如 "DIAGNOSE"）——经 PromptContextVO.intentLabel 注入 [用户意图] 前缀 */
+        private String currentIntent;
+
+        /** 当前意图识别结果——反馈回路（reportFeedback 重分类）读取/更新 */
+        private IntentResultVO currentIntentResult;
+
+        /** 待注入的意图修正提示——反馈回路重分类后置位，下一轮 AiCallNode 消费后清空（一次性注入防重复） */
+        @Builder.Default
+        private String pendingIntentCorrection = "";
 
         // ══════════════════════════════════════════════════════════
         //  辅助方法

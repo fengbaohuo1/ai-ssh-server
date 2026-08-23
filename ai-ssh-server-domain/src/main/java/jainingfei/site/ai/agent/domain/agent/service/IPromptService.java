@@ -36,11 +36,22 @@ public interface IPromptService {
      * @param terminalSessionId  SSH 终端会话 ID（即 connectionId，可为 null）
      * @param recentCommands     最近执行的命令列表
      * @param messageHistory     业务侧消息历史（已裁剪）
+     * @param intentLabel        意图标签（由意图识别系统提供，可为 null）
      * @return 注入了动态上下文的用户消息（前缀 + "\n---\n" + 原始消息）
      */
     String buildEnrichedMessage(String userMessage, String sessionId, String userId,
                                 String terminalSessionId, List<String> recentCommands,
-                                List<Map<String, Object>> messageHistory);
+                                List<Map<String, Object>> messageHistory, String intentLabel);
+
+    /**
+     * 构建注入了动态上下文的用户消息（向后兼容重载，无意图标签时使用）。
+     */
+    default String buildEnrichedMessage(String userMessage, String sessionId, String userId,
+                                        String terminalSessionId, List<String> recentCommands,
+                                        List<Map<String, Object>> messageHistory) {
+        return buildEnrichedMessage(userMessage, sessionId, userId, terminalSessionId,
+                recentCommands, messageHistory, null);
+    }
 
     /**
      * 构建增量富化前缀（显式循环第 2 轮起使用）。

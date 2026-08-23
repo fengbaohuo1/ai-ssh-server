@@ -39,6 +39,7 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 - [动态 Prompt 上下文增强——AI 装上眼睛与记性](D:\study\notes\ai-ssh\动态%20Prompt%20上下文增强——AI%20装上眼睛与记性.md) — 教学项目 2-4 节落地：环境采集 + 里程碑追踪 + 最近命令记忆 + 危险命令拦截
 - [显式 ReAct 编排——循环控制权回归应用层](D:\study\notes\ai-ssh\显式%20ReAct%20编排——循环控制权回归应用层.md) — 架空 ADK 内部循环：FixedSpringAI 单轮模式（工具调用转 `<tool_calls>` 标签）、每轮富化落地、多命令结果累积回灌、5 个 bug 修复
 - [ReAct 上下文治理与历史净化——教程 2-5 和 2-6 吸收落地](D:\study\notes\ai-ssh\ReAct%20上下文治理与历史净化——教程%202-5%20和%202-6%20吸收落地.md) — 吸收教程 2-5/2-6：ContextProvider 体系（任务锚点 + 工具摘要）、HybridReducer 历史裁剪三件套、CustomAdkSessionService 框架层净化 + 限流、四道闸门分工
+- [意图识别——规则与LLM级联+反馈回路（教程 2-7 吸收落地）](D:\study\notes\ai-ssh\意图识别——规则与LLM级联+反馈回路（教程%202-7%20吸收落地）.md) — 吸收教程 2-7：规则→LLM 级联置信度漏斗、反馈回路重分类、ContextTracker/LRU 缓存、显式循环适配（第 1 轮识别、ToolCallNode 反馈、修正提示一次性注入）、spring-ai 2.x 适配
 - 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉
 
 ### 核心 API

@@ -47,12 +47,20 @@ public class RunnerNode extends AbstractArmorySupport {
 
 
         Runner runner = createRunner(dynamicContext, aiAgentConfigTableVO, appName);
+
+        // 模型配置透传到 AiAgentRegisterVO——供意图识别 LLM 分类器复用
+        // （spring-ai 2.x 无 OpenAiApi 类，直接透传 baseUrl/apiKey/model 三要素）
+        AiAgentConfigTableVO.Module.ChatModel chatModelConfig = aiAgentConfigTableVO.getModule().getChatModel();
+
         AiAgentRegisterVO aiAgentRegisterVO = AiAgentRegisterVO.builder()
                 .appName(appName)
                 .agentId(agentId)
                 .agentName(agentName)
                 .agentDesc(agentDesc)
                 .runner(runner)
+                .modelBaseUrl(chatModelConfig != null ? chatModelConfig.getBaseUrl() : null)
+                .modelApiKey(chatModelConfig != null ? chatModelConfig.getApiKey() : null)
+                .chatModelName(chatModelConfig != null ? chatModelConfig.getModel() : null)
                 .build();
         registerBean(agentId, AiAgentRegisterVO.class, aiAgentRegisterVO);
 

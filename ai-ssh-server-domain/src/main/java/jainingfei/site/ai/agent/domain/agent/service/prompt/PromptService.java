@@ -47,13 +47,15 @@ public class PromptService implements IPromptService {
     @Override
     public String buildEnrichedMessage(String userMessage, String sessionId, String userId,
                                        String terminalSessionId, List<String> recentCommands,
-                                       List<Map<String, Object>> messageHistory) {
+                                       List<Map<String, Object>> messageHistory, String intentLabel) {
         // 1. 聚合各 ContextProvider（环境 / 任务 / 里程碑 / 工具摘要）→ PromptContextVO
         PromptContextVO promptContextVO = chatContextService.buildPromptContext(
                 sessionId, userId, terminalSessionId, messageHistory);
         promptContextVO.setRecentCommands(recentCommands);
+        // 2. 意图标签流转：intentLabel → PromptContextVO.intentLabel → DynamicPromptBuilder 前缀
+        promptContextVO.setIntentLabel(intentLabel);
 
-        // 2. 生成消息前缀
+        // 3. 生成消息前缀
         String prefix = dynamicPromptBuilder.buildMessagePrefix(promptContextVO);
 
         if (prefix.isEmpty()) {

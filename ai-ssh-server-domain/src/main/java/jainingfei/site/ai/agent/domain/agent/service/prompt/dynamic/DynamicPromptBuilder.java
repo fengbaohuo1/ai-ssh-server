@@ -76,6 +76,14 @@ public class DynamicPromptBuilder {
             hasContent = true;
         }
 
+        // [用户意图] 段落——意图识别结果（由意图识别系统经 PromptContextVO.intentLabel 注入），
+        // 仅做提示不做强制路由：即便识别为 DIAGNOSE，主模型仍可自主决定调用哪些工具
+        if (!isEmpty(ctx.getIntentLabel())) {
+            if (hasContent) sb.append("\n");
+            sb.append("[用户意图]\n").append(ctx.getIntentLabel()).append("\n");
+            hasContent = true;
+        }
+
         // [关键事件] 段落
         if (ctx.getMilestoneVOS() != null && !ctx.getMilestoneVOS().isEmpty()) {
             if (hasContent) sb.append("\n");

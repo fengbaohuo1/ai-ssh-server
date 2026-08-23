@@ -39,4 +39,11 @@ public class PromptContextVO {
 
     /** 当前任务描述（首条用户消息）——防长对话任务漂移 */
     private String taskDescription;
+
+    /**
+     * 当前意图标签（由意图识别系统经 PromptService.buildEnrichedMessage(intentLabel) 注入）。
+     * <p>
+     * 由 {@code DynamicPromptBuilder} 渲染为消息前缀 "[用户意图] xxx"，让主模型感知意图但不强制路由。
+     */
+    private String intentLabel;
 }

@@ -11,7 +11,10 @@ import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
+import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
@@ -63,6 +66,9 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
     @Resource
     private IChatContextService chatContextService;
 
+    @Resource
+    private IIntentService intentService;
+
     /** 工具调用 id 序列（全局唯一，用于业务侧历史中 assistant tool_calls 与 tool 结果的配对） */
     private static final java.util.concurrent.atomic.AtomicInteger TOOL_CALL_SEQ =
             new java.util.concurrent.atomic.AtomicInteger(0);
@@ -83,9 +89,38 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         }
         Runner runner = registerVO.getRunner();
 
-        // 2. 绑定终端会话到工具（session 已由 RootNode 通过 ChatService 创建/校验）
+        // 2. 最新用户消息（显式循环中每轮都是同一条原始消息）
+        String lastUserMessage = requestParameter.getMessage();
+
+        // 2.1 绑定终端会话到工具（session 已由 RootNode 通过 ChatService 创建/校验）
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
             SshExecuteAdkTool.bindSession(sessionId, terminalSessionId);
+        }
+
+        // 2.2 意图识别——仅第 1 轮执行（显式循环下第 2 轮起消息仍是原文，识别结果不变；
+        // 且覆盖 currentIntentResult 会丢掉反馈回路的重分类结果；LRU 缓存保证第 1 轮本身也不重复开销）
+        if (ctx.getStep() == 0) {
+            if (registerVO.getModelBaseUrl() != null && registerVO.getChatModelName() != null) {
+                intentService.configure(
+                        registerVO.getModelBaseUrl(), registerVO.getModelApiKey(), registerVO.getChatModelName());
+            }
+            IntentResultVO intentResult = intentService.classify(sessionId, userId, lastUserMessage);
+            log.info("识别到用户意图: {}, 置信度: {}, 候选: {}, 重分类: {}",
+                    intentResult.getIntent().getLabel(),
+                    intentResult.getConfidence(),
+                    intentResult.getCandidateIntents(),
+                    intentResult.isReclassified());
+            // 将意图保存到上下文供后续使用
+            ctx.setCurrentIntent(intentResult.getIntent().name());
+            ctx.setCurrentIntentResult(intentResult);
+            // COMPOUND / UNKNOWN / 低置信度：交给主模型自行判断，不再硬路由
+            if (intentResult.getIntent() == IntentTypeEnumVO.COMPOUND) {
+                log.info("复合意图，候选 {} —— 交由主模型拆解", intentResult.getCandidateIntents());
+            } else if (intentResult.getIntent() == IntentTypeEnumVO.UNKNOWN
+                    || intentResult.getConfidence() < 0.5) {
+                log.info("意图不确定 ({}，conf={}) —— 全交主模型决策",
+                        intentResult.getIntent(), intentResult.getConfidence());
+            }
         }
 
         // 3. 清空当前轮工具调用标记（防上轮残留；工具结果不清——多轮累积供 UserFeedbackNode 汇总）
@@ -97,14 +132,13 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         ctx.setMessageHistory(new ArrayList<>(trimmedHistory));
 
         // 4. 富化用户消息（每轮都做；第 1 轮全量注入，后续轮只注入增量，避免前缀重复累积）
-        String lastUserMessage = requestParameter.getMessage();
-
         String enrichedMessage;
         if (ctx.getStep() == 0) {
-            // 第 1 轮：全量注入（环境信息 + 最近命令 + 历史里程碑 + 当前任务 + 工具摘要）
+            // 第 1 轮：全量注入（环境信息 + 最近命令 + 历史里程碑 + 当前任务 + 工具摘要 + 用户意图）
             enrichedMessage = promptService.buildEnrichedMessage(
                     lastUserMessage, sessionId, ctx.getUserId(),
-                    terminalSessionId, ctx.getRecentCommands(), ctx.getMessageHistory());
+                    terminalSessionId, ctx.getRecentCommands(), ctx.getMessageHistory(),
+                    ctx.getCurrentIntent());
             // 更新注入水位——必须先于记录本消息里程碑：
             // 本消息的纠偏/切换应影响"下一轮"决策，而不是出现在它自己消息的前缀里
             ctx.markEnrichmentInjected();
@@ -116,6 +150,12 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
             String delta = promptService.buildIncrementalPrefix(
                     sessionId, ctx.getInjectedMilestoneTs(),
                     ctx.getRecentCommands(), ctx.getInjectedCommandCount());
+            // 意图修正提示（反馈回路重分类后置位，一次性注入后清空，防历史中重复累积）
+            String correction = ctx.getPendingIntentCorrection();
+            if (correction != null && !correction.isEmpty()) {
+                delta = delta.isEmpty() ? correction : delta + "\n" + correction;
+                ctx.setPendingIntentCorrection("");
+            }
             enrichedMessage = delta.isEmpty() ? lastUserMessage : delta + "\n---\n" + lastUserMessage;
             ctx.markEnrichmentInjected();
         }
