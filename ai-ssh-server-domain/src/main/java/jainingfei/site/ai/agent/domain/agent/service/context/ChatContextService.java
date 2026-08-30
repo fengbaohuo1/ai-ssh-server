@@ -96,6 +96,7 @@ public class ChatContextService implements IChatContextService {
                 .milestoneVOS((List<MilestoneVO>) finalCtx.get("milestoneVOS"))
                 .toolResultSummary((String) finalCtx.get("toolResultSummary"))
                 .taskDescription((String) finalCtx.get("taskDescription"))
+                .longTermMemorySummary((String) finalCtx.get("longTermMemorySummary"))
                 .build();
     }
 
@@ -108,8 +109,8 @@ public class ChatContextService implements IChatContextService {
     }
 
     @Override
-    public void pushToolResult(String sessionId, String toolName, String result) {
-        toolResultProvider.pushResult(sessionId, toolName, result);
+    public void pushToolResult(String sessionId, String toolName, String command, boolean success, String result) {
+        toolResultProvider.pushResult(sessionId, toolName, command, success, result);
     }
 
     @Override
@@ -117,5 +118,15 @@ public class ChatContextService implements IChatContextService {
         if (sessionId != null) {
             toolResultProvider.clear(sessionId);
         }
+    }
+
+    @Override
+    public int getToolResultCount(String sessionId) {
+        return sessionId == null ? 0 : toolResultProvider.count(sessionId);
+    }
+
+    @Override
+    public List<String> getToolResultTimeline(String sessionId, int fromIndex) {
+        return sessionId == null ? List.of() : toolResultProvider.timelineSince(sessionId, fromIndex);
     }
 }

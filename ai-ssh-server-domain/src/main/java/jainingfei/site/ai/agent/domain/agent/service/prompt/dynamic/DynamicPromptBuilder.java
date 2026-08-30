@@ -84,6 +84,13 @@ public class DynamicPromptBuilder {
             hasContent = true;
         }
 
+        // [长期记忆] 段落——跨会话结构化召回（LongTermMemoryProvider，order=25）
+        if (!isEmpty(ctx.getLongTermMemorySummary())) {
+            if (hasContent) sb.append("\n");
+            sb.append("[长期记忆]\n").append(ctx.getLongTermMemorySummary()).append("\n");
+            hasContent = true;
+        }
+
         // [关键事件] 段落
         if (ctx.getMilestoneVOS() != null && !ctx.getMilestoneVOS().isEmpty()) {
             if (hasContent) sb.append("\n");

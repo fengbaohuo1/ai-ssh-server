@@ -9,7 +9,10 @@ import com.google.genai.types.Part;
 import java.util.Optional;
 import io.reactivex.rxjava3.core.Flowable;
 import jakarta.annotation.Resource;
+import jainingfei.site.ai.agent.domain.agent.adapter.repository.IChatHistoryRepository;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatCommandEntity;
+import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
+import jainingfei.site.ai.agent.domain.agent.model.entity.ChatSessionEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.AiAgentAutoConfigProperties;
@@ -41,6 +44,8 @@ public class ChatService implements IChatService {
     private AiAgentAutoConfigProperties aiAgentAutoConfigProperties;
     @Resource
     private ISshConnectionService sshConnectionService;
+    @Resource
+    private IChatHistoryRepository chatHistoryRepository;
 
     @Override
     public List<AiAgentConfigTableVO.Agent> queryAiAgentConfigList() {
@@ -58,6 +63,11 @@ public class ChatService implements IChatService {
 
     @Override
     public String createSession(String agentId, String userId) {
+        return createSession(agentId, userId, null);
+    }
+
+    @Override
+    public String createSession(String agentId, String userId, String clientSessionId) {
         AiAgentRegisterVO aiAgentRegisterVO = defaultArmoryFactory.getAiAgentRegisterVO(agentId);
         if (null == aiAgentRegisterVO) {
             throw new AppException(ResponseCode.E0001.getCode());
@@ -66,12 +76,51 @@ public class ChatService implements IChatService {
         String appName = aiAgentRegisterVO.getAppName();
         Runner runner = aiAgentRegisterVO.getRunner();
 
-        String sessionId = userSessions.computeIfAbsent(userId, uid -> {
-            Session session = runner.sessionService().createSession(appName, uid)
-                    .blockingGet();
-            return session.id();
-        });
+        String sessionId;
+        if (clientSessionId != null && !clientSessionId.isBlank()) {
+            // 会话连续性（2-8 修复③）：客户端带回旧 sessionId——
+            // 进程内已有则复用；进程内没有（服务重启）则以该 id 重建 ADK 会话，
+            // 配合 RootNode 的 DB 冷启动恢复，旧对话得以接续
+            sessionId = userSessions.computeIfAbsent(userId, uid -> clientSessionId);
+            Session existSession = runner.sessionService()
+                    .getSession(appName, userId, sessionId, Optional.empty()).blockingGet();
+            if (existSession == null) {
+                runner.sessionService()
+                        .createSession(appName, userId, new ConcurrentHashMap<>(), sessionId)
+                        .blockingGet();
+                log.info("以客户端 sessionId 重建 ADK 会话 userId={} sessionId={}", userId, sessionId);
+            }
+        } else {
+            sessionId = userSessions.computeIfAbsent(userId, uid -> {
+                Session session = runner.sessionService().createSession(appName, uid)
+                        .blockingGet();
+                return session.id();
+            });
+        }
+
+        // 会话元数据旁路落库（2-8）：saveSession 按 id 幂等，重启重复创建不报错
+        try {
+            chatHistoryRepository.saveSession(ChatSessionEntity.builder()
+                    .id(sessionId)
+                    .agentId(agentId)
+                    .userId(userId)
+                    .title("新会话")
+                    .messageCount(0)
+                    .build());
+        } catch (Exception e) {
+            log.error("保存会话元数据失败 sessionId={}", sessionId, e);
+        }
         return sessionId;
+    }
+
+    @Override
+    public List<ChatSessionEntity> querySessionList(String agentId, String userId, int limit) {
+        return chatHistoryRepository.querySessionList(agentId, userId, limit > 0 ? limit : 20);
+    }
+
+    @Override
+    public List<ChatMessageEntity> queryMessageList(String sessionId, int limit) {
+        return chatHistoryRepository.queryMessageList(sessionId, limit > 0 ? limit : 100);
     }
 
     @Override

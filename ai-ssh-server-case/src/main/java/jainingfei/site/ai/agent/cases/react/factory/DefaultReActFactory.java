@@ -139,6 +139,10 @@ public class DefaultReActFactory {
         @Builder.Default
         private long injectedMilestoneTs = 0L;
 
+        /** 已注入前缀的工具结果条数水位——增量注入水位（2-8 修复①：时间线只注入该下标之后的新条目） */
+        @Builder.Default
+        private int injectedToolResultCount = 0;
+
         /** 原始用户任务（首条用户消息原文）——防长对话任务漂移，TaskProvider 的数据源之一 */
         private String originalUserTask;
 
@@ -208,11 +212,13 @@ public class DefaultReActFactory {
          *
          * <p>调用时机：每次 buildEnrichedMessage / buildIncrementalPrefix 之后。
          * 命令水位取当前累计条数；里程碑水位取当前时间（先标记后记录的里程碑，
-         * 时间戳必然晚于水位，会在下一轮以增量形式注入）。
+         * 时间戳必然晚于水位，会在下一轮以增量形式注入）；工具结果水位取
+         * ToolResultProvider 当前缓存条数。
          */
-        public void markEnrichmentInjected() {
+        public void markEnrichmentInjected(int toolResultCount) {
             this.injectedCommandCount = recentCommands.size();
             this.injectedMilestoneTs = System.currentTimeMillis();
+            this.injectedToolResultCount = Math.max(toolResultCount, this.injectedToolResultCount);
         }
 
     }

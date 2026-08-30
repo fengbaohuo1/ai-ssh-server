@@ -94,6 +94,85 @@ VALUES
 UNLOCK TABLES;
 
 
+# 转储表 chat_session
+# ------------------------------------------------------------
+
+DROP TABLE IF EXISTS `chat_session`;
+
+CREATE TABLE `chat_session` (
+                                `id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '会话ID(UUID)',
+                                `agent_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '智能体ID',
+                                `user_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '用户ID',
+                                `title` varchar(200) COLLATE utf8mb4_unicode_ci DEFAULT '新会话' COMMENT '会话标题',
+                                `message_count` int NOT NULL DEFAULT '0' COMMENT '消息数量',
+                                `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                                PRIMARY KEY (`id`),
+                                KEY `idx_user_agent` (`user_id`,`agent_id`),
+                                KEY `idx_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话会话表';
+
+
+# 转储表 chat_message
+# ------------------------------------------------------------
+
+DROP TABLE IF EXISTS `chat_message`;
+
+CREATE TABLE `chat_message` (
+                                `id` bigint NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+                                `session_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '会话ID',
+                                `role` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '角色:user/assistant/tool',
+                                `content` text COMMENT '消息内容',
+                                `tool_name` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '工具名称',
+                                `tool_call_id` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '工具调用ID',
+                                `priority` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'MEDIUM' COMMENT '优先级:CRITICAL/HIGH/MEDIUM/LOW',
+                                `token_count` int NOT NULL DEFAULT '0' COMMENT '预估token数',
+                                `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                PRIMARY KEY (`id`),
+                                KEY `idx_session_id` (`session_id`,`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话消息表';
+
+
+# 转储表 chat_milestone
+# ------------------------------------------------------------
+
+DROP TABLE IF EXISTS `chat_milestone`;
+
+CREATE TABLE `chat_milestone` (
+                                  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+                                  `session_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '会话ID',
+                                  `type` varchar(30) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '类型:TASK_CHANGE/USER_CORRECTION/ERROR等',
+                                  `content` text COMMENT '内容摘要',
+                                  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                  PRIMARY KEY (`id`),
+                                  KEY `idx_session_id` (`session_id`,`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话里程碑表';
+
+
+# 转储表 long_term_memory
+# ------------------------------------------------------------
+
+DROP TABLE IF EXISTS `long_term_memory`;
+
+CREATE TABLE `long_term_memory` (
+                                    `id` bigint NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+                                    `user_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '用户ID',
+                                    `session_id` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '来源会话ID',
+                                    `memory_type` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '记忆类型:USER_PREFERENCE/ENVIRONMENT_FACT/SOFTWARE_FACT/TROUBLESHOOTING_CASE',
+                                    `memory_key` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '记忆去重键',
+                                    `content` text COMMENT '记忆内容',
+                                    `keywords` varchar(512) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '关键词集合(逗号分隔)',
+                                    `source_role` varchar(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '来源角色:user/tool/assistant',
+                                    `confidence` decimal(5,2) NOT NULL DEFAULT '0.50' COMMENT '置信度',
+                                    `hit_count` int NOT NULL DEFAULT '1' COMMENT '命中/更新次数',
+                                    `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                    `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                                    PRIMARY KEY (`id`),
+                                    UNIQUE KEY `uk_user_type_key` (`user_id`,`memory_type`,`memory_key`),
+                                    KEY `idx_user_time` (`user_id`,`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='长期记忆表';
+
+
 
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;

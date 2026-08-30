@@ -14,6 +14,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
+import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
@@ -76,6 +77,9 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
 
     @Resource
     private IIntentService intentService;
+
+    @Resource
+    private ILongTermMemoryService longTermMemoryService;
 
     /**
      * 单轮 Runner 调用结果。
@@ -221,18 +225,23 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                 ctx.getCurrentIntent());
         // 更新注入水位——必须先于记录本消息里程碑：
         // 本消息的纠偏/切换应影响"下一轮"决策，而不是出现在它自己消息的前缀里
-        ctx.markEnrichmentInjected();
+        ctx.markEnrichmentInjected(chatContextService.getToolResultCount(ctx.getSessionId()));
         // 记录用户消息里程碑（仅第 1 轮：原始消息只在循环入口出现一次，
         // 逐轮重复记录会把同一事件刷满 50 条上限，挤掉真实的工具报错事件）
         promptService.detectAndRecordMilestone(ctx.getSessionId(), "user", lastUserMessage);
+        // 用户消息落库 + 偏好记忆提取（2-8）：仅首轮落库（原始消息只在循环入口出现一次）
+        longTermMemoryService.saveUserMessage(
+                ctx.getUserId(), ctx.getSessionId(), lastUserMessage,
+                ctx.getCurrentIntent(), true);
         return enrichedMessage;
     }
 
-    /** 第 2 轮起：只注入新增命令 + 新增里程碑（增量水位过滤）+ 意图修正提示 */
+    /** 第 2 轮起：只注入新增命令 + 新增里程碑 + 工具执行时间线（增量水位过滤）+ 意图修正提示 */
     private String buildSubsequentRoundMessage(String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
         String delta = promptService.buildIncrementalPrefix(
                 ctx.getSessionId(), ctx.getInjectedMilestoneTs(),
-                ctx.getRecentCommands(), ctx.getInjectedCommandCount());
+                ctx.getRecentCommands(), ctx.getInjectedCommandCount(),
+                ctx.getInjectedToolResultCount());
 
         // 意图修正提示（反馈回路重分类后置位，一次性注入后清空，防历史中重复累积）
         String correction = ctx.getPendingIntentCorrection();
@@ -241,7 +250,7 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
             ctx.setPendingIntentCorrection("");
         }
 
-        ctx.markEnrichmentInjected();
+        ctx.markEnrichmentInjected(chatContextService.getToolResultCount(ctx.getSessionId()));
         return delta.isEmpty() ? lastUserMessage : delta + "\n---\n" + lastUserMessage;
     }
 
@@ -278,6 +287,14 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
 
             // 记录 assistant 消息到业务侧历史（含工具调用标记，供裁剪器分组配对）
             appendAssistantMessage(ctx, textAccumulator);
+
+            // 助手回复落库 + 结论记忆提取（2-8）：textAccumulator 已剥离 <tool_calls> 标签，
+            // 落库的是纯文本回复；旁路语义在 saveAssistantMessage 内部（失败仅 warn）
+            String assistantText = textAccumulator.toString();
+            if (!assistantText.isBlank()) {
+                longTermMemoryService.saveAssistantMessage(
+                        ctx.getUserId(), ctx.getSessionId(), assistantText);
+            }
         } catch (Exception e) {
             log.error("ADK Runner 调用失败: {}", e.getMessage(), e);
             ctx.setErrorMessage("ADK Runner error: " + e.getMessage());

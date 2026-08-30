@@ -5,6 +5,7 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -62,9 +63,9 @@ public class ToolResultProvider implements ContextProvider {
     }
 
     /** 写入一条工具执行结果，并使摘要缓存失效 */
-    public void pushResult(String sessionId, String toolName, String result) {
+    public void pushResult(String sessionId, String toolName, String command, boolean success, String result) {
         List<ToolResultEntry> entries = results.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>());
-        entries.add(new ToolResultEntry(toolName, result));
+        entries.add(new ToolResultEntry(toolName, command, success, result));
         while (entries.size() > MAX_ENTRIES_PER_SESSION) {
             entries.remove(0);
         }
@@ -77,6 +78,42 @@ public class ToolResultProvider implements ContextProvider {
             results.remove(sessionId);
             summaryCache.remove(sessionId);
         }
+    }
+
+    /** 查询指定会话已缓存的工具结果条数（供增量注入水位对比） */
+    public int count(String sessionId) {
+        if (sessionId == null) {
+            return 0;
+        }
+        List<ToolResultEntry> entries = results.get(sessionId);
+        return entries == null ? 0 : entries.size();
+    }
+
+    /**
+     * 查询自 fromIndex 下标以来的工具执行时间线（每条一行："-$ cmd ✓/✗"）。
+     *
+     * <p>供增量前缀注入——显式循环下工具执行摘要在后续轮次不注入，
+     * 时间线以增量方式补上长程轨迹：每轮追加一轮的执行流水，
+     * 配合会话历史累积，模型能看到跨轮的"做过什么、成败如何"。
+     */
+    public List<String> timelineSince(String sessionId, int fromIndex) {
+        if (sessionId == null) {
+            return List.of();
+        }
+        List<ToolResultEntry> entries = results.get(sessionId);
+        if (entries == null || entries.isEmpty()) {
+            return List.of();
+        }
+        // 快照后取增量，避免遍历期间新条目加入引发并发修改
+        List<ToolResultEntry> snapshot = new ArrayList<>(entries);
+        int from = Math.max(0, fromIndex);
+        if (from >= snapshot.size()) {
+            return List.of();
+        }
+        return snapshot.subList(from, snapshot.size()).stream()
+                .map(e -> "- $ " + truncate(e.getCommand() != null ? e.getCommand() : e.getToolName(), 80)
+                        + (e.isSuccess() ? " ✓" : " ✗"))
+                .collect(Collectors.toList());
     }
 
     private String generateSummary(List<ToolResultEntry> entries) {
@@ -104,6 +141,10 @@ public class ToolResultProvider implements ContextProvider {
     @AllArgsConstructor
     public static class ToolResultEntry {
         private String toolName;
+        /** 执行的命令（时间线展示用） */
+        private String command;
+        /** 执行是否成功（时间线 ✓/✗ 标记） */
+        private boolean success;
         private String result;
     }
 }

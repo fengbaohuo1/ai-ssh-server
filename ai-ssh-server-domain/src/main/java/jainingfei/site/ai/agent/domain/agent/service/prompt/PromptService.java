@@ -67,7 +67,8 @@ public class PromptService implements IPromptService {
 
     @Override
     public String buildIncrementalPrefix(String sessionId, long sinceMilestoneTs,
-                                         List<String> recentCommands, int sinceCommandCount) {
+                                         List<String> recentCommands, int sinceCommandCount,
+                                         int sinceToolResultCount) {
         StringBuilder sb = new StringBuilder();
         boolean hasContent = false;
 
@@ -92,6 +93,18 @@ public class PromptService implements IPromptService {
             sb.append("[新增关键事件]\n");
             for (MilestoneVO m : freshMilestones) {
                 sb.append("- [").append(m.getType().name()).append("] ").append(m.getContent()).append("\n");
+            }
+            hasContent = true;
+        }
+
+        // 3. 工具执行时间线（2-8/修复①）：自水位以来的执行流水一行式，
+        //    显式循环下 [工具执行摘要] 全量段不会进入后续轮次，靠此增量补上长程轨迹
+        List<String> toolTimeline = chatContextService.getToolResultTimeline(sessionId, sinceToolResultCount);
+        if (!toolTimeline.isEmpty()) {
+            if (hasContent) sb.append("\n");
+            sb.append("[工具执行记录]\n");
+            for (String line : toolTimeline) {
+                sb.append(line).append("\n");
             }
             hasContent = true;
         }

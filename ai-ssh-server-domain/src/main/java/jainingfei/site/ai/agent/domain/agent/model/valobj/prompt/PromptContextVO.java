@@ -46,4 +46,7 @@ public class PromptContextVO {
      * 由 {@code DynamicPromptBuilder} 渲染为消息前缀 "[用户意图] xxx"，让主模型感知意图但不强制路由。
      */
     private String intentLabel;
+
+    /** 长期记忆摘要（跨会话、结构化召回）——由 LongTermMemoryProvider 召回注入 */
+    private String longTermMemorySummary;
 }

@@ -7,6 +7,7 @@ import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
+import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jainingfei.site.ai.agent.domain.agent.service.intent.IntentService;
@@ -44,6 +45,9 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
     /** 工具结果截断长度 */
     private static final int MAX_RESULT_LENGTH = 4000;
 
+    /** 回灌结果累积上限（修复②）：多命令累积时超出则保留头尾、丢弃中段，防下一轮输入暴涨 */
+    private static final int MAX_ACCUMULATED_LENGTH = 8000;
+
     @Resource
     private SshExecuteAdkTool sshExecuteAdkTool;
 
@@ -55,6 +59,9 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
 
     @Resource
     private IIntentService intentService;
+
+    @Resource
+    private ILongTermMemoryService longTermMemoryService;
 
     @Override
     protected ReActResultDTO doApply(ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
@@ -94,6 +101,7 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
             Map<String, Object> result = sshExecuteAdkTool.executeCommand(sessionId, command);
             String resultText = formatResult(result);
             resultText = truncate(resultText, MAX_RESULT_LENGTH);
+            Object callId = call.get("id");
 
             // 记录最近命令（记录命令本身，而非输出——显式循环下能拿到命令）
             ctx.addRecentCommand(command);
@@ -101,8 +109,16 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
             // 记录工具结果里程碑（工具报错等关键事件）
             promptService.detectAndRecordMilestone(sessionId, "tool", resultText);
 
-            // 推送工具结果到会话级缓存（ToolResultProvider 生成摘要，供下一轮 Prompt 注入）
-            chatContextService.pushToolResult(sessionId, toolName, resultText);
+            // 推送工具结果到会话级缓存（命令+成败供时间线展示，结果供摘要生成）
+            boolean success = Boolean.TRUE.equals(result.get("success"))
+                    && !longTermMemoryService.isFailureContent(resultText);
+            chatContextService.pushToolResult(sessionId, toolName, command, success, resultText);
+
+            // 工具消息落库 + 环境事实/软件版本/失败信号记忆提取（2-8）
+            longTermMemoryService.saveToolMessage(
+                    ctx.getUserId(), sessionId, toolName,
+                    callId != null ? String.valueOf(callId) : null,
+                    resultText, success);
 
             // 反馈回路：根据工具结果判定当前意图是否走偏，必要时重分类
             // （显式循环下工具在本节点执行，故挂在这里而非 AiCallNode——教程中 ADK 内部
@@ -111,7 +127,6 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
 
             // 存储工具结果（累积，UserFeedbackNode 汇总；id 与 assistant tool_calls 配对）
             Map<String, Object> toolResultInfo = new HashMap<>();
-            Object callId = call.get("id");
             if (callId != null) {
                 toolResultInfo.put("id", callId);
             }
@@ -125,10 +140,12 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
                 ctx.appendToolMessage(String.valueOf(callId), resultText);
             }
 
-            // 结果回灌下一轮：命令 + 输出（多条命令累积——覆盖会导致 LLM 只见最后一条）
+            // 结果回灌下一轮：命令 + 输出（多条命令累积——覆盖会导致 LLM 只见最后一条）。
+            // 累积设上限（修复②）：超出保留头尾、丢弃中段，防大输出把下一轮输入撑爆
             String roundResult = "$ " + command + "\n" + resultText;
             String prev = ctx.getLastToolResultText();
-            ctx.setLastToolResultText(prev.isEmpty() ? roundResult : prev + "\n\n" + roundResult);
+            String merged = prev.isEmpty() ? roundResult : prev + "\n\n" + roundResult;
+            ctx.setLastToolResultText(capAccumulated(merged));
 
             // 发送完整结果 Map（command/output/success/suggestion）——前端协议约定 r 为 JSON 对象，
             // jsonField(r, "output") 取结果、jsonField(r, "success") 判断成败
@@ -205,6 +222,22 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() > max ? s.substring(0, max) + "\n... (truncated, total " + s.length() + " chars)" : s;
+    }
+
+    /**
+     * 回灌结果累积上限保护（修复②）：lastToolResultText 会在下一轮整体拼入 userContent，
+     * 单条结果虽已截 4000 字符，但单轮最多 10 次调用仍可累积 4 万字符。
+     * 超限保留头尾（头 4500 + 尾 3000），中段以省略标记替代——最近的输出和最老的输出
+     * 都比中段更有信息量（命令回显在头部、最终结果在尾部）。
+     */
+    private static String capAccumulated(String text) {
+        if (text == null || text.length() <= MAX_ACCUMULATED_LENGTH) {
+            return text;
+        }
+        int omitted = text.length() - MAX_ACCUMULATED_LENGTH;
+        String head = text.substring(0, 4500);
+        String tail = text.substring(text.length() - 3000);
+        return head + "\n... (中间省略 " + omitted + " 字符) ...\n" + tail;
     }
 
     /**

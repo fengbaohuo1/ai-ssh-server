@@ -41,13 +41,26 @@ public interface IChatContextService {
 
     /**
      * 推送一条工具执行结果到会话级缓存（ToolResultProvider），
-     * 供下一轮 buildPromptContext 生成工具摘要。
+     * 供下一轮 buildPromptContext 生成工具摘要、增量前缀生成执行时间线。
      *
      * @param sessionId 当前会话 ID
      * @param toolName  工具名称
+     * @param command   执行的命令（时间线展示用，可为 null）
+     * @param success   执行是否成功（时间线 ✓/✗ 标记）
      * @param result    工具执行结果
      */
-    void pushToolResult(String sessionId, String toolName, String result);
+    void pushToolResult(String sessionId, String toolName, String command, boolean success, String result);
+
+    /**
+     * 查询指定会话已缓存的工具结果条数（增量注入水位对比用）。
+     */
+    int getToolResultCount(String sessionId);
+
+    /**
+     * 查询自 fromIndex 下标以来的工具执行时间线（每条一行："-$ cmd ✓/✗"）。
+     * 供增量前缀注入，弥补"工具执行摘要只覆盖最近几条"的长程轨迹盲区。
+     */
+    java.util.List<String> getToolResultTimeline(String sessionId, int fromIndex);
 
     /**
      * 清理指定会话的上下文缓存（对话结束后调用，防旧结果污染下一轮）。

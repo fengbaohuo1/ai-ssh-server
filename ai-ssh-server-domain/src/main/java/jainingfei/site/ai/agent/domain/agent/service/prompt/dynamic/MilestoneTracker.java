@@ -1,5 +1,7 @@
 package jainingfei.site.ai.agent.domain.agent.service.prompt.dynamic;
 
+import jakarta.annotation.Resource;
+import jainingfei.site.ai.agent.domain.agent.adapter.repository.IChatHistoryRepository;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.MilestoneVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -21,6 +23,8 @@ import java.util.regex.Pattern;
  *   <li>会话隔离——ConcurrentHashMap key=sessionId，多用户互不干扰</li>
  *   <li>容量上限——每会话最多 50 条，超出淘汰最老的，防止长对话撑爆内存</li>
  *   <li>按角色区分——同一词在不同角色含义不同（用户说"错了"是纠偏，工具输出 error 是执行失败）</li>
+ *   <li>持久化（2-8）——写入时旁路落库 chat_milestone；读取时 DB 优先、内存兜底，
+ *       重启后里程碑不丢失</li>
  * </ul>
  */
 @Slf4j
@@ -28,7 +32,11 @@ import java.util.regex.Pattern;
 public class MilestoneTracker {
 
     private static final int MAX_MILESTONES = 50;
+
     private final Map<String, LinkedList<MilestoneVO>> milestones = new ConcurrentHashMap<>();
+
+    @Resource
+    private IChatHistoryRepository chatHistoryRepository;
 
     /**
      * 检测并记录里程碑事件。
@@ -77,11 +85,25 @@ public class MilestoneTracker {
     /**
      * 获取指定会话最近的 N 条里程碑事件。
      *
+     * <p>DB 优先：重启后内存为空，从 chat_milestone 表恢复，保证持久化不丢失；
+     * DB 查询失败或无数据时降级到内存缓存。
+     *
      * @param sessionId 会话 ID
      * @param limit     返回条数上限
      * @return 里程碑列表（按时间正序），无数据时返回空列表
      */
     public List<MilestoneVO> getRecent(String sessionId, int limit) {
+        // 1. DB 优先查询（2-8 新增）
+        try {
+            List<MilestoneVO> recentMilestones = chatHistoryRepository.getRecentMilestones(sessionId, limit);
+            if (recentMilestones != null && !recentMilestones.isEmpty()) {
+                return recentMilestones;
+            }
+        } catch (Exception e) {
+            log.warn("从 DB 查询里程碑失败，降级内存缓存 sessionId={}", sessionId, e);
+        }
+
+        // 2. 内存缓存兜底
         LinkedList<MilestoneVO> list = milestones.getOrDefault(sessionId, new LinkedList<>());
         synchronized (list) {
             int from = Math.max(0, list.size() - limit);
@@ -102,7 +124,7 @@ public class MilestoneTracker {
     //  内部方法
     // ═══════════════════════════════════════════════════════════════
 
-    /** 追加里程碑到会话队列，超出上限淘汰最老记录 */
+    /** 追加里程碑到会话队列，超出上限淘汰最老记录；同时旁路落库，DB 失败不影响主流程 */
     private void push(String sessionId, MilestoneVO milestoneVO) {
         LinkedList<MilestoneVO> list = milestones.computeIfAbsent(sessionId, k -> new LinkedList<>());
         synchronized (list) {
@@ -110,6 +132,13 @@ public class MilestoneTracker {
             while (list.size() > MAX_MILESTONES) {
                 list.removeFirst();
             }
+        }
+
+        // 数据库持久化（2-8 新增）：旁路写入，记忆持久化是"锦上添花"而非"生死攸关"
+        try {
+            chatHistoryRepository.saveMilestone(sessionId, milestoneVO);
+        } catch (Exception e) {
+            log.error("保存里程碑失败 sessionId={}", sessionId, e);
         }
     }
 
