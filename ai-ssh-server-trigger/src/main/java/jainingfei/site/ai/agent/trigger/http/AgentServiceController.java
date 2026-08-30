@@ -5,6 +5,8 @@ import jainingfei.site.ai.agent.api.IAgentService;
 import jainingfei.site.ai.agent.api.dto.*;
 import jainingfei.site.ai.agent.api.response.Response;
 import jainingfei.site.ai.agent.cases.react.IAIAgentReActServiceCase;
+import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
+import jainingfei.site.ai.agent.domain.agent.model.entity.ChatSessionEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
@@ -13,6 +15,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -115,6 +118,57 @@ public class AgentServiceController implements IAgentService {
             SseEmitter emitter = new SseEmitter();
             emitter.completeWithError(e);
             return emitter;
+        }
+    }
+
+    @RequestMapping(value = "query_session_list", method = RequestMethod.GET)
+    @Override
+    public Response<List<ChatSessionResponseDTO>> querySessionList(String agentId, String userId, Integer limit) {
+        try {
+            log.info("查询会话列表 agentId:{} userId:{}", agentId, userId);
+            List<ChatSessionEntity> sessions = chatService.querySessionList(agentId, userId, limit != null ? limit : 20);
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            List<ChatSessionResponseDTO> dtoList = sessions.stream().map(s -> {
+                ChatSessionResponseDTO dto = new ChatSessionResponseDTO();
+                dto.setSessionId(s.getId());
+                dto.setAgentId(s.getAgentId());
+                dto.setUserId(s.getUserId());
+                dto.setTitle(s.getTitle());
+                dto.setMessageCount(s.getMessageCount());
+                dto.setUpdatedAt(s.getUpdatedAt() != null ? s.getUpdatedAt().format(fmt) : null);
+                return dto;
+            }).collect(Collectors.toList());
+            return Response.<List<ChatSessionResponseDTO>>builder()
+                    .code(ResponseCode.SUCCESS.getCode()).info(ResponseCode.SUCCESS.getInfo()).data(dtoList).build();
+        } catch (Exception e) {
+            log.error("查询会话列表失败", e);
+            return Response.<List<ChatSessionResponseDTO>>builder()
+                    .code(ResponseCode.UN_ERROR.getCode()).info(ResponseCode.UN_ERROR.getInfo()).build();
+        }
+    }
+
+    @RequestMapping(value = "query_message_list", method = RequestMethod.GET)
+    @Override
+    public Response<List<ChatMessageResponseDTO>> queryMessageList(String sessionId, Integer limit) {
+        try {
+            log.info("查询会话消息列表 sessionId:{}", sessionId);
+            List<ChatMessageEntity> messages = chatService.queryMessageList(sessionId, limit != null ? limit : 100);
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            List<ChatMessageResponseDTO> dtoList = messages.stream().map(m -> {
+                ChatMessageResponseDTO dto = new ChatMessageResponseDTO();
+                dto.setRole(m.getRole());
+                dto.setContent(m.getContent());
+                dto.setToolName(m.getToolName());
+                dto.setToolCallId(m.getToolCallId());
+                dto.setCreatedAt(m.getCreatedAt() != null ? m.getCreatedAt().format(fmt) : null);
+                return dto;
+            }).collect(Collectors.toList());
+            return Response.<List<ChatMessageResponseDTO>>builder()
+                    .code(ResponseCode.SUCCESS.getCode()).info(ResponseCode.SUCCESS.getInfo()).data(dtoList).build();
+        } catch (Exception e) {
+            log.error("查询会话消息列表失败", e);
+            return Response.<List<ChatMessageResponseDTO>>builder()
+                    .code(ResponseCode.UN_ERROR.getCode()).info(ResponseCode.UN_ERROR.getInfo()).build();
         }
     }
 

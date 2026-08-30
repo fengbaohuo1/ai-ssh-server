@@ -23,4 +23,14 @@ public interface IAgentService {
 
     SseEmitter chatStream(ChatRequestDTO requestDTO);
 
+    /**
+     * 查询用户在某智能体下的会话列表（2-8 会话历史，按更新时间倒序）
+     */
+    Response<List<ChatSessionResponseDTO>> querySessionList(String agentId, String userId, Integer limit);
+
+    /**
+     * 查询会话消息列表（2-8 会话历史回放，时间正序）
+     */
+    Response<List<ChatMessageResponseDTO>> queryMessageList(String sessionId, Integer limit);
+
 }
