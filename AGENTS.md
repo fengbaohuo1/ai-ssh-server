@@ -16,7 +16,7 @@ AI + SSH 的服务端项目，提供 SSH 连接的管理和操作能力。基于
 D:\study\notes\ai-ssh\
 ```
 
-以便集中查阅和管理。项目根目录下的 `CLAUDE.md` 不存放总结正文，只保留项目说明和指向总结文档的链接。
+以便集中查阅和管理。
 
 **书写总结时必须遵循** `D:\study\notes\CLAUDE.md` 中的编写规则——一篇一主题、模板结构（问题背景→核心方案→关键代码→踩坑记录）、互相引用、善用 Mermaid 图表。
 
@@ -40,6 +40,8 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 - [显式 ReAct 编排——循环控制权回归应用层](D:\study\notes\ai-ssh\显式%20ReAct%20编排——循环控制权回归应用层.md) — 架空 ADK 内部循环：FixedSpringAI 单轮模式（工具调用转 `<tool_calls>` 标签）、每轮富化落地、多命令结果累积回灌、5 个 bug 修复
 - [ReAct 上下文治理与历史净化——教程 2-5 和 2-6 吸收落地](D:\study\notes\ai-ssh\ReAct%20上下文治理与历史净化——教程%202-5%20和%202-6%20吸收落地.md) — 吸收教程 2-5/2-6：ContextProvider 体系（任务锚点 + 工具摘要）、HybridReducer 历史裁剪三件套、CustomAdkSessionService 框架层净化 + 限流、四道闸门分工
 - [意图识别——规则与LLM级联+反馈回路（教程 2-7 吸收落地）](D:\study\notes\ai-ssh\意图识别——规则与LLM级联+反馈回路（教程%202-7%20吸收落地）.md) — 吸收教程 2-7：规则→LLM 级联置信度漏斗、反馈回路重分类、ContextTracker/LRU 缓存、显式循环适配（第 1 轮识别、ToolCallNode 反馈、修正提示一次性注入）、spring-ai 2.x 适配
+- [长期记忆与对话持久化——教程 2-8 吸收落地](D:\study\notes\ai-ssh\长期记忆与对话持久化——教程%202-8%20吸收落地.md) — 吸收教程 2-8：4 张表（chat_session/chat_message/chat_milestone/long_term_memory）、消息流经时规则提取 4 类记忆、UNIQUE 键去重 + hit_count、粗筛精排召回、节点挂钩旁路写入、冷启动恢复与会话连续性、顺带修复 3 个 bug（工具摘要注入缺席/回灌累积上限/会话连续性）
+- [上下文策略的代际演进与场景适配——设计讨论复盘](D:\study\notes\ai-ssh\上下文策略的代际演进与场景适配——设计讨论复盘.md) — 2-8 前后设计讨论沉淀：记忆价值=重观察代价、轨迹 vs 里程碑分工、正则长尾实测（Redis 正则与 9 种版本输出）、order=25 隐性契约、每轮裁剪 vs 阈值压缩、SaaS vs 本地 Agent 保守分层；附项目待优化清单
 - 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉
 
 ### 核心 API
