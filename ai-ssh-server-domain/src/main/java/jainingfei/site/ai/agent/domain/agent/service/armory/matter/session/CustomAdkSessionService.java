@@ -286,8 +286,9 @@ public class CustomAdkSessionService implements BaseSessionService {
      * 从文本中剥离动态注入后缀。
      *
      * <p>按最后一个 {@code \n---\n} 分隔线切分并保留分隔线之前的部分——
-     * 动态段自身不含分隔线，而用户原文可能含分隔线，取最后一个最稳妥；
-     * 若没有分隔线，再根据典型后缀段落标签做启发式判断。
+     * 动态段自身不含分隔线，而用户原文/工具输出可能含分隔线，取最后一个最稳妥；
+     * 且要求分隔线之后的内容以动态段典型标记开头（防御"动态段为空时工具输出自带
+     * 分隔线"的误切）。若没有分隔线，再根据典型后缀段落标签做启发式判断。
      *
      * <p>案例 1（第 1 轮富化消息）：
      * <pre>
@@ -320,7 +321,7 @@ public class CustomAdkSessionService implements BaseSessionService {
      */
     private String stripDynamicSuffix(String text) {
         int sepIndex = text.lastIndexOf("\n---\n");
-        if (sepIndex >= 0) {
+        if (sepIndex >= 0 && isDynamicTail(text.substring(sepIndex + "\n---\n".length()))) {
             String head = text.substring(0, sepIndex).trim();
             return head.isEmpty() ? text : head;
         }
@@ -340,6 +341,25 @@ public class CustomAdkSessionService implements BaseSessionService {
         }
         String head = text.substring(0, splitIndex).trim();
         return head.isEmpty() ? text : head;
+    }
+
+    /**
+     * 分隔线之后的"动态段"必须以典型段标记开头（全量/增量/意图修正三类），
+     * 否则视为用户原文或工具输出自带的分隔线，不剥离。
+     */
+    private static boolean isDynamicTail(String tail) {
+        String t = tail.trim();
+        return t.startsWith("[系统环境]")
+                || t.startsWith("[最近执行的命令]")
+                || t.startsWith("[当前任务]")
+                || t.startsWith("[用户意图]")
+                || t.startsWith("[长期记忆]")
+                || t.startsWith("[关键事件]")
+                || t.startsWith("[工具执行摘要]")
+                || t.startsWith("[本轮新增命令]")
+                || t.startsWith("[新增关键事件]")
+                || t.startsWith("[工具执行记录]")
+                || t.startsWith("[用户意图已修正]");
     }
 
     /** 截断过长的事件文本——head/tail 保留 + 省略计数，框架层 Session 保留"够用信息"，不无上限保存完整原文 */
