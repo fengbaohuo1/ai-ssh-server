@@ -167,8 +167,20 @@ public class CustomAdkSessionService implements BaseSessionService {
             normalized = sanitizeUserEvent(normalized);
         } else if ("tool".equalsIgnoreCase(role)) {
             normalized = truncateEventText(normalized, maxToolText);
-        } else if ("assistant".equalsIgnoreCase(role) || "model".equalsIgnoreCase(role)) {
+        } else if (isAssistantRole(role)) {
             normalized = truncateEventText(normalized, maxAssistantText);
+            // 流式 assistant 碎片合并：FixedSpringAI 每收到一个流式 chunk 就产出一个
+            // LlmResponse → ADK 落一条 assistant 事件。若不合并，一条完整回复会被碎成
+            // 几十条 1-3 字的事件——既撑爆 MAX_EVENTS 把早期 user 消息削掉，又让请求出现
+            // "连续 assistant 碎片、无 user 间隔"，触发 DeepSeek thinking 模式 400
+            // （reasoning_content in thinking mode must be passed back）。
+            // 合并只作用于存储（改写上一条事件文本）；返回给调用方的仍是本条事件，
+            // 流式 SSE 推送与 AiCallNode 逐事件消费不受影响。
+            if (mergeIntoPreviousAssistant(snapshot, normalized)) {
+                mergeStateDelta(snapshot, normalized);
+                snapshot.setLastUpdateTime(resolveUpdateTime(normalized));
+                return Single.just(normalized);
+            }
         }
 
         snapshot.getRawEvents().add(normalized);
@@ -177,6 +189,41 @@ public class CustomAdkSessionService implements BaseSessionService {
         snapshot.setLastUpdateTime(resolveUpdateTime(normalized));
 
         return Single.just(normalized);
+    }
+
+    /** assistant/model 均视为助手消息角色 */
+    private static boolean isAssistantRole(String role) {
+        return "assistant".equalsIgnoreCase(role) || "model".equalsIgnoreCase(role);
+    }
+
+    /**
+     * 把一条流式 assistant 碎片文本合并进会话里上一条 assistant 事件（无则不动）。
+     * <p>合并后重新应用单条上限（head/tail 保留，保首尾丢中段）。
+     *
+     * @return true = 已并入上一条（调用方不要再追加新事件）
+     */
+    private boolean mergeIntoPreviousAssistant(SessionSnapshot snapshot, Event incoming) {
+        List<Event> events = snapshot.getRawEvents();
+        if (events.isEmpty()) {
+            return false;
+        }
+        Event prev = events.get(events.size() - 1);
+        if (!isAssistantRole(resolveRole(prev))) {
+            return false;
+        }
+        String prevText = prev.stringifyContent();
+        String incText = incoming.stringifyContent();
+        if (prevText == null || incText == null || incText.isEmpty()) {
+            return false;
+        }
+        String merged = prevText + incText;
+        if (merged.length() > maxAssistantText) {
+            merged = TextRetentionUtil.retainHeadTail(merged, maxAssistantText);
+        }
+        Content content = prev.content().orElse(Content.builder().role(resolveRole(prev)).build());
+        String role = content.role().orElse(resolveRole(prev));
+        prev.setContent(Content.builder().role(role).parts(List.of(Part.fromText(merged))).build());
+        return true;
     }
 
     // ═══════════════════════════════════════════════════════════════
