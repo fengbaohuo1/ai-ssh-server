@@ -44,9 +44,9 @@ public class AgentNode extends AbstractArmorySupport {
                     .name(agentConfig.getName())
                     .instruction(agentConfig.getInstruction())
                     .description(agentConfig.getDescription())
-                    // 单轮模式：工具调用以 <tool_calls> 文本标签输出，ADK 内部循环被架空，
-                    // 循环推进与工具执行由 Case 层显式 ReAct 编排接管
-                    .model(new FixedSpringAI(chatModel, true))
+                    // V3 托管循环：FixedSpringAI 输出原生 FunctionCall part，ADK Runner 内部循环
+                    // 自动执行工具并推进到最终回复（finalResponse）；循环熔断走 RunConfig.maxLlmCalls
+                    .model(new FixedSpringAI(chatModel))
                     .outputKey(agentConfig.getOutputKey())
                     .tools(mcpToolsets)
                     .build();

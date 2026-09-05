@@ -46,9 +46,10 @@ import java.util.concurrent.ConcurrentMap;
  * <p>治理手段（appendEvent 时按角色执行；上限经 ai.session-governance.* 可配置）：
  * <ul>
  *   <li>user → sanitizeUserEvent：剥离动态后缀（2-9 起动态段在分隔线之后），只留原始用户问题（+工具结果），并截断到上限</li>
- *   <li>tool → truncateEventText(1000)</li>
- *   <li>assistant/model → truncateEventText(2000)</li>
- *   <li>所有事件 → trimEvents：最多保留 max-turns 轮、max-events 条</li>
+ *   <li>tool → truncateEventText(4000)：FunctionResponse 事件会进入托管循环的下一轮 LLM 请求</li>
+ *   <li>assistant/model → truncateEventText(2000)：V3 partial 语义下一次 LLM 调用只有一条聚合事件落库，
+ *       无需再碎片合并；限长仍跳过隐藏草稿标记区</li>
+ *   <li>所有事件 → trimEvents：最多保留 max-turns 轮、max-events 条（压缩引擎启用后降级为兜底，见压缩提交）</li>
  *   <li>stateDelta → mergeStateDelta：只同步最新运行态，不保存整段历史</li>
  * </ul>
  *
@@ -67,8 +68,9 @@ public class CustomAdkSessionService implements BaseSessionService {
     @Value("${ai.session-governance.max-assistant-text:2000}")
     private int maxAssistantText;
 
-    /** tool 结果文本的最大保留长度（可配置，默认 1000） */
-    @Value("${ai.session-governance.max-tool-text:1000}")
+    /** tool 结果文本的最大保留长度（可配置，默认 4000——托管循环下 FunctionResponse 事件
+     * 会原样进入下一轮 LLM 请求（Contents 从会话事件重建），与工具返回前截断对齐） */
+    @Value("${ai.session-governance.max-tool-text:4000}")
     private int maxToolText;
 
     /** user 事件的最大保留长度（剥离动态段后；富化消息可能内嵌工具结果；可配置，默认 4000） */
@@ -172,18 +174,6 @@ public class CustomAdkSessionService implements BaseSessionService {
             // assistant 事件可能携带"隐藏草稿标记"（DeepSeek thinking 草稿随文本落库）：
             // 限长只作用于可见正文，标记区（base64 草稿）不参与 head/tail 截断，防止标记损坏
             normalized = truncateAssistantEvent(normalized);
-            // 流式 assistant 碎片合并：FixedSpringAI 每收到一个流式 chunk 就产出一个
-            // LlmResponse → ADK 落一条 assistant 事件。若不合并，一条完整回复会被碎成
-            // 几十条 1-3 字的事件——既撑爆 MAX_EVENTS 把早期 user 消息削掉，又让请求出现
-            // "连续 assistant 碎片、无 user 间隔"，触发 DeepSeek thinking 模式 400
-            // （reasoning_content in thinking mode must be passed back）。
-            // 合并只作用于存储（改写上一条事件文本）；返回给调用方的仍是本条事件，
-            // 流式 SSE 推送与 AiCallNode 逐事件消费不受影响。
-            if (mergeIntoPreviousAssistant(snapshot, normalized)) {
-                mergeStateDelta(snapshot, normalized);
-                snapshot.setLastUpdateTime(resolveUpdateTime(normalized));
-                return Single.just(normalized);
-            }
         }
 
         snapshot.getRawEvents().add(normalized);
@@ -203,36 +193,6 @@ public class CustomAdkSessionService implements BaseSessionService {
     /** assistant/model 均视为助手消息角色 */
     private static boolean isAssistantRole(String role) {
         return "assistant".equalsIgnoreCase(role) || "model".equalsIgnoreCase(role);
-    }
-
-    /**
-     * 把一条流式 assistant 碎片文本合并进会话里上一条 assistant 事件（无则不动）。
-     * <p>合并后重新应用单条上限（head/tail 保留，保首尾丢中段）。
-     *
-     * @return true = 已并入上一条（调用方不要再追加新事件）
-     */
-    private boolean mergeIntoPreviousAssistant(SessionSnapshot snapshot, Event incoming) {
-        List<Event> events = snapshot.getRawEvents();
-        if (events.isEmpty()) {
-            return false;
-        }
-        Event prev = events.get(events.size() - 1);
-        if (!isAssistantRole(resolveRole(prev))) {
-            return false;
-        }
-        String prevText = prev.stringifyContent();
-        String incText = incoming.stringifyContent();
-        if (prevText == null || incText == null || incText.isEmpty()) {
-            return false;
-        }
-        String merged = prevText + incText;
-        if (merged.length() > maxAssistantText) {
-            merged = limitAssistantText(merged);
-        }
-        Content content = prev.content().orElse(Content.builder().role(resolveRole(prev)).build());
-        String role = content.role().orElse(resolveRole(prev));
-        prev.setContent(Content.builder().role(role).parts(List.of(Part.fromText(merged))).build());
-        return true;
     }
 
     // ═══════════════════════════════════════════════════════════════

@@ -4,14 +4,18 @@ spring:
   profiles:
     active: dev
 
-# 会话治理参数（教程 2-5/2-6 吸收 + W2 参数化）
-# 默认值 = 原代码硬编码常量，行为不漂移；各 profile 可按模型窗口/成本诉求覆盖。
-# 注意：MAX_TURNS/MAX_EVENTS 超限是"从头丢事件"，与 2-9 前缀缓存互斥——W4 将改为预算触发压缩。
+# 会话治理参数（教程 2-5/2-6 吸收 + W2 参数化；V3 托管循环回归后修订）
+# V3 起 ADK Runner 只持久化"聚合事件"（一次 LLM 调用一条），不再有流式碎片；
+# MAX_TURNS/MAX_EVENTS 丢头语义将在压缩引擎落地后降级为兜底（见 compact.* 注释）。
 ai:
   session-governance:
-    max-events: 20            # ADK Session 最多保留的事件条数
-    max-turns: 4              # 最多保留的用户轮次
+    max-events: 20            # ADK Session 最多保留的事件条数（压缩引擎启用后仅作兜底）
+    max-turns: 4              # 最多保留的用户轮次（同上）
     max-user-text: 4000       # user 事件净化后保留上限（字符）
-    max-tool-text: 1000       # tool 事件单条保留上限（head/tail）
-    max-assistant-text: 2000  # assistant/model 事件单条保留上限（head/tail）
-    context-token-budget: 8000  # 业务侧历史裁剪预算（HybridReducer；AiCallNode 传 0 回退到此默认）
+    max-tool-text: 4000       # tool 事件单条保留上限（head/tail；托管循环下 FunctionResponse
+                              # 事件会进入下一轮 LLM 请求，与 SshExecuteAdkTool 返回前截断对齐）
+    max-assistant-text: 2000  # assistant/model 事件单条保留上限（head/tail；聚合事件一条一截）
+    context-token-budget: 8000  # 业务侧历史裁剪预算（HybridReducer；回合入口传 0 回退到此默认）
+    loop:
+      max-llm-calls: 30         # 单次 runAsync 内 LLM 调用上限（ADK 托管循环熔断，
+                                # 超限抛 LlmCallsLimitExceededException 结束回合）

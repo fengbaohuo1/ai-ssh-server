@@ -68,4 +68,32 @@ public interface IChatContextService {
      * @param sessionId 当前会话 ID
      */
     void clearSessionContext(String sessionId);
+
+    // ═══════════════════════════════════════════════════════════════
+    //  会话级运行状态（V3 托管循环：跨"用户回合"持久、回合内供工具/反馈读写）
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * 记录一条最近执行的命令（FIFO，上限 20，跨回合保留——回合级富化 [最近执行的命令] 的数据源）。
+     */
+    void pushRecentCommand(String sessionId, String command);
+
+    /** 查询会话最近执行的命令（按时间正序）。 */
+    java.util.List<String> getRecentCommands(String sessionId);
+
+    /**
+     * 保存会话当前意图识别结果（回合开始 classify 写入；回合中工具反馈可重分类覆盖）。
+     */
+    void setSessionIntent(String sessionId, jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO intent);
+
+    /** 读取会话当前意图识别结果（无则 null）。 */
+    jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO getSessionIntent(String sessionId);
+
+    /**
+     * 置位意图修正提示（反馈回路重分类后）——下一回合入口富化消费后清空（一次性注入防重复）。
+     */
+    void setPendingIntentCorrection(String sessionId, String correction);
+
+    /** 取走并清除待注入的意图修正提示（无则 null）。 */
+    String consumePendingIntentCorrection(String sessionId);
 }

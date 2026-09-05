@@ -8,6 +8,7 @@ import com.google.adk.models.springai.ToolConverter;
 import com.google.genai.types.Content;
 import com.google.genai.types.FunctionCall;
 import com.google.genai.types.FunctionResponse;
+import com.google.genai.types.GenerateContentResponseUsageMetadata;
 import com.google.genai.types.Part;
 import io.reactivex.rxjava3.core.Flowable;
 
@@ -20,6 +21,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.StreamingChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 
@@ -28,32 +30,40 @@ import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.completions.CompletionUsage;
 import jainingfei.site.ai.agent.domain.agent.support.ReasoningTagUtil;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
 import org.springframework.ai.deepseek.api.DeepSeekApi;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * ADK Spring AI 适配器——Spring AI 做 LLM 通信，ADK 做工具编排。
+ * ADK Spring AI 适配器——Spring AI 做 LLM 通信，ADK 做工具循环 + 编排（框架托管循环）。
  *
  * <pre>
- * 工具流：
+ * 工具流（托管循环模式，V3）：
  *   toPrompt(): ADK 工具 → ToolConverter → Spring AI ToolCallback → LLM（原生 function calling）
  *   toLlmResponse(): Spring AI ChatResponse → ADK LlmResponse（文本 + FunctionCall parts）
  *
- * 单轮模式（singleTurnMode=true）：
- *   工具调用不转成 ADK FunctionCall part，改为 &lt;tool_calls&gt; 文本标签——
- *   ADK 看不到 function call，每次 runAsync() 只跑一轮 LLM。
- *   工具执行与循环推进由 Case 层（显式 ReAct 编排）接管。
+ * 流式 partial/聚合语义（对齐 ADK Gemini 适配器，V3）：
+ *   每次 LLM 调用：
+ *     1. 文本分片 → partial=true 的 LlmResponse 即时发出（Runner 只转发不持久化，SSE 实时）
+ *     2. 工具调用分片 → 不单独发事件，聚合进本次调用
+ *     3. 流结束 → 发一条聚合 LlmResponse（partial 为空）：
+ *        content = [隐藏草稿标记前缀 + 可见全文文本] + FunctionCall parts
+ *        该事件是唯一被 Runner 持久化的 model 事件——会话历史里一次 LLM 调用一条
+ *        assistant 事件（替代旧的"每分片一条事件 + SessionService 碎片合并"）。
+ *        草稿标记只随聚合事件落库（分片不持久化，无需带标记），下轮重建历史时
+ *        解析并放回 DeepSeekAssistantMessage.reasoningContent（L2 草稿延续）。
+ *    usageMetadata 映射到聚合事件——供 ADK 事件压缩（tail-retention）读取真实
+ *    promptTokenCount 触发折叠。
  *
- * \n\n 处理：
- *   isNotEmpty() 上下文感知——流中已出现 tool call 后过滤纯空白 chunk（artifact），
- *   纯文本对话中保留（真实段落分隔）。
+ * 空白 chunk 处理（统一策略）：
+ *   纯空白 chunk → 缓冲，等下一个文本 chunk 合并发出（phantom 空白过滤，真实换行保留）；
+ *   文本 chunk → 缓冲的空白 + 文本合并发出；流结束仍滞留的空白 → 丢弃（phantom）。
  * </pre>
  */
 @Slf4j
@@ -64,18 +74,10 @@ public class FixedSpringAI extends BaseLlm {
     private final ChatModel chatModel;
     private final StreamingChatModel streamingChatModel;
 
-    /** 单轮模式：工具调用以 &lt;tool_calls&gt; 文本标签输出，不触发 ADK 内部工具循环 */
-    private final boolean singleTurnMode;
-
     public FixedSpringAI(ChatModel chatModel) {
-        this(chatModel, false);
-    }
-
-    public FixedSpringAI(ChatModel chatModel, boolean singleTurnMode) {
         super(extractModelName(chatModel));
         this.chatModel = chatModel;
         this.streamingChatModel = chatModel instanceof StreamingChatModel ? (StreamingChatModel) chatModel : null;
-        this.singleTurnMode = singleTurnMode;
     }
 
     @Override
@@ -85,37 +87,40 @@ public class FixedSpringAI extends BaseLlm {
             // 每次模型调用独立的草稿累积器（DeepSeek thinking：草稿分片先于正文到达）
             ReasoningAccumulator reasoningAcc = new ReasoningAccumulator();
             if (stream && streamingChatModel != null) {
-                boolean hasTools = req.tools() != null && !req.tools().isEmpty();
-
                 // 流式 usage 只在末块返回，且末块通常无文本——会被下方空白过滤/缓冲逻辑丢弃，
-                // 因此在过滤之前观察每个 chunk，记录最后一次出现的 usage，流结束后统一输出
+                // 因此在过滤之前观察每个 chunk，记录最后一次出现的 usage，聚合事件上统一输出
                 AtomicReference<Usage> usageRef = new AtomicReference<>();
-                // 同时在过滤前捕获 DeepSeek 思考草稿分片（reasoning chunk 文本为空，不进正文流）
+                // 单次调用的流式状态：已发出的文本 + 已解析的工具调用（按 id 去重聚合）
+                StreamAccumulator streamAcc = new StreamAccumulator();
                 Flowable<ChatResponse> observed = Flowable.fromPublisher(
                                 streamingChatModel.stream(prompt))
                         .doOnNext(cr -> observeUsage(cr, usageRef))
                         .doOnNext(cr -> captureReasoning(cr, reasoningAcc));
 
-                if (hasTools) {
-                    // 工具模式：空白 chunk 缓冲合并（phantom 空白过滤），真实换行保留
-                    AtomicReference<String> pendingWs = new AtomicReference<>("");
-                    return observed
-                            .flatMap(cr -> mergeWhitespace(cr, pendingWs))
-                            .map(cr -> toLlmResponse(cr, reasoningAcc))
-                            .doOnComplete(() -> logUsage(usageRef.get()));
-                }
-
-                // 无工具模式：只过滤 null/空，保留段落分隔
-                return observed
-                        .filter(FixedSpringAI::isNotEmpty)
-                        .map(cr -> toLlmResponse(cr, reasoningAcc))
-                        .doOnComplete(() -> logUsage(usageRef.get()));
+                // ① 分片事件（partial=true，Runner 不持久化，仅流式转发）
+                Flowable<LlmResponse> partials = observed
+                        .flatMap(cr -> toPartialLlmResponse(cr, streamAcc));
+                // ② 聚合事件（partial=null，唯一落库的 model 事件）
+                return partials.concatWith(
+                        Flowable.defer(() -> buildAggregated(reasoningAcc, streamAcc, usageRef)));
             }
-            ChatResponse resp = chatModel.call(prompt);
-            logUsage(resp.getMetadata() != null ? resp.getMetadata().getUsage() : null);
             // 同步路径一次拿全量响应：先捕获草稿再注入（与流式路径一致）
+            ChatResponse resp = chatModel.call(prompt);
             captureReasoning(resp, reasoningAcc);
-            return Flowable.just(toLlmResponse(resp, reasoningAcc));
+            StreamAccumulator streamAcc = new StreamAccumulator();
+            List<AssistantMessage.ToolCall> toolCalls = resp.getResult().getOutput().getToolCalls();
+            if (toolCalls != null) {
+                for (AssistantMessage.ToolCall tc : toolCalls) {
+                    if ("function".equals(tc.type())) {
+                        streamAcc.mergeToolCall(tc);
+                    }
+                }
+            }
+            if (resp.getResult().getOutput().getText() != null) {
+                streamAcc.visible.append(resp.getResult().getOutput().getText());
+            }
+            return buildAggregated(reasoningAcc, streamAcc, new AtomicReference<>(
+                    resp.getMetadata() != null ? resp.getMetadata().getUsage() : null));
         } catch (Exception e) {
             return Flowable.error(e);
         }
@@ -127,7 +132,31 @@ public class FixedSpringAI extends BaseLlm {
     private static final class ReasoningAccumulator {
         final StringBuilder reasoning = new StringBuilder();
         boolean seen = false;
-        boolean injected = false;
+    }
+
+    /** 单次流式调用的聚合状态：可见文本累积 + 工具调用聚合（按 id 去重） */
+    private static final class StreamAccumulator {
+        final StringBuilder visible = new StringBuilder();
+        /** 纯空白 chunk 缓冲（phantom 过滤：等下一个文本 chunk 合并后一起发出） */
+        final StringBuilder pendingWs = new StringBuilder();
+        /** 工具调用 id → ToolCall（DeepSeek 流式分片可能重复携带完整 tool_calls，按 id 取最新） */
+        final Map<String, AssistantMessage.ToolCall> toolCalls = new LinkedHashMap<>();
+
+        void mergeToolCall(AssistantMessage.ToolCall tc) {
+            String id = tc.id() != null ? tc.id() : "";
+            if (toolCalls.containsKey(id) && tc.arguments() == null) {
+                return;
+            }
+            toolCalls.put(id, tc);
+        }
+
+        boolean hasToolCalls() {
+            return !toolCalls.isEmpty();
+        }
+
+        List<AssistantMessage.ToolCall> toolCallList() {
+            return new ArrayList<>(toolCalls.values());
+        }
     }
 
     /**
@@ -145,19 +174,6 @@ public class FixedSpringAI extends BaseLlm {
                 acc.reasoning.append(frag);
             }
         }
-    }
-
-    /**
-     * 首个"可见内容"chunk 到达时，把已聚合的完整草稿以隐藏标记前缀注入该 chunk 文本
-     * （DeepSeek 的思考分片总是先于正文/工具调用分片到达）。标记随 assistant 事件文本落库，
-     * 下一轮重建历史时解析并放回 DeepSeekAssistantMessage.reasoningContent（L2 草稿延续）。
-     */
-    private static String reasoningPrefix(ReasoningAccumulator acc, boolean firstVisibleContent) {
-        if (firstVisibleContent && acc.seen && !acc.injected && acc.reasoning.length() > 0) {
-            acc.injected = true;
-            return ReasoningTagUtil.wrap(acc.reasoning.toString());
-        }
-        return "";
     }
 
     // ===== Usage 观测（教程 2-9：缓存命中可验证） =====
@@ -179,10 +195,8 @@ public class FixedSpringAI extends BaseLlm {
                 extractCachedTokens(usage));
     }
 
-    /**
-     * 提取缓存命中的 token 数：优先 spring-ai 的 CacheRead 字段（2.0.0 起提供），
-     * 未填充时回退到 OpenAI SDK 原生 usage 的 prompt_tokens_details.cached_tokens。
-     */
+    /** 提取缓存命中的 token 数：优先 spring-ai 的 CacheRead 字段（2.0.0 起提供），
+     * 未填充时回退到 OpenAI SDK 原生 usage 的 prompt_tokens_details.cached_tokens。 */
     private static Long extractCachedTokens(Usage usage) {
         try {
             Long cached = usage.getCacheReadInputTokens();
@@ -210,6 +224,25 @@ public class FixedSpringAI extends BaseLlm {
             log.debug("提取缓存命中 token 失败: {}", e.getMessage());
         }
         return null;
+    }
+
+    /** spring-ai Usage → genai usageMetadata（压缩引擎读取真实 promptTokenCount） */
+    private static GenerateContentResponseUsageMetadata toUsageMetadata(Usage usage) {
+        if (usage == null) {
+            return null;
+        }
+        try {
+            GenerateContentResponseUsageMetadata.Builder builder = GenerateContentResponseUsageMetadata.builder();
+            if (usage.getPromptTokens() != null) builder.promptTokenCount(usage.getPromptTokens());
+            if (usage.getCompletionTokens() != null) builder.candidatesTokenCount(usage.getCompletionTokens());
+            if (usage.getTotalTokens() != null) builder.totalTokenCount(usage.getTotalTokens());
+            Long cached = extractCachedTokens(usage);
+            if (cached != null) builder.cachedContentTokenCount(cached.intValue());
+            return builder.build();
+        } catch (Exception e) {
+            log.debug("usage → usageMetadata 映射失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     @Override
@@ -330,115 +363,94 @@ public class FixedSpringAI extends BaseLlm {
             return List.of();
         }
         DeepSeekAssistantMessage.Builder builder = DeepSeekAssistantMessage.builder()
-                .content(visible)
                 .reasoningContent(reasoning);
+        if (!visible.isEmpty()) {
+            builder.content(visible);
+        }
         if (!toolCalls.isEmpty()) {
             builder.toolCalls(toolCalls);
         }
         return List.of(builder.build());
     }
 
-    // ===== ChatResponse → LlmResponse =====
+    // ===== ChatResponse → LlmResponse（分片 / 聚合） =====
 
     /**
-     * 工具模式空白缓冲合并——替代旧的"连续空白计数过滤"。
-     *
-     * <p>旧策略保留前 2 个空白 chunk，误杀真实换行（Markdown 表格/多行文本的换行
-     * 也是独立空白 chunk，数量远超 2）；本策略改为：
-     * <ul>
-     *   <li>空白 chunk → 缓冲（不发），等下一个文本 chunk</li>
-     *   <li>文本 chunk → 缓冲的空白 + 文本合并发出（真实换行完整保留）</li>
-     *   <li>工具调用 chunk / 流结束 → 丢弃缓冲（phantom 空白过滤）</li>
-     * </ul>
-     * 真实换行保留与 phantom 过滤兼得，不依赖 phantom 的具体位置。
+     * 分片转换（流式）：文本 chunk → partial=true 事件；工具调用 chunk → 聚合进
+     * {@link StreamAccumulator} 不单独发事件；空白 chunk → 缓冲合并策略（phantom 过滤，
+     * 真实换行保留），与旧的工具模式行为一致。
      */
-    private static Flowable<ChatResponse> mergeWhitespace(ChatResponse cr, AtomicReference<String> pendingWs) {
+    private static Flowable<LlmResponse> toPartialLlmResponse(ChatResponse cr, StreamAccumulator acc) {
         if (cr == null || cr.getResults().isEmpty()) return Flowable.empty();
         AssistantMessage am = cr.getResult().getOutput();
 
-        // 工具调用 chunk：丢弃缓冲的空白（phantom），直接发出
+        // 工具调用 chunk：不单独发事件（聚合进本次调用，最终由聚合事件携带）
         if (!am.getToolCalls().isEmpty()) {
-            pendingWs.set("");
-            return Flowable.just(cr);
+            for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
+                if ("function".equals(tc.type())) {
+                    acc.mergeToolCall(tc);
+                }
+            }
+            return Flowable.empty();
         }
 
         String text = am.getText();
         if (text == null || text.isEmpty()) return Flowable.empty();
 
-        // 纯空白 chunk：缓冲，等待下一个文本 chunk 合并
+        // 纯空白 chunk：缓冲，等待下一个文本 chunk 合并（phantom 空白过滤）
         if (text.trim().isEmpty()) {
-            pendingWs.set(pendingWs.get() + text);
+            acc.pendingWs.append(text);
             return Flowable.empty();
         }
 
-        // 文本 chunk：合并缓冲的空白后发出
-        String combined = pendingWs.get() + text;
-        pendingWs.set("");
-        return Flowable.just(withText(cr, combined));
+        // 文本 chunk：合并缓冲的空白后发出（真实换行完整保留）
+        String combined = acc.pendingWs + text;
+        acc.pendingWs.setLength(0);
+        acc.visible.append(combined);
+        return Flowable.just(LlmResponse.builder()
+                .content(Content.builder().role("model").parts(List.of(Part.fromText(combined))).build())
+                .partial(true)
+                .build());
     }
 
-    /** 构造带合并文本的 ChatResponse（文本 chunk 无 toolCalls，安全复制） */
-    private static ChatResponse withText(ChatResponse cr, String text) {
-        AssistantMessage am = AssistantMessage.builder().content(text).build();
-        return ChatResponse.builder()
-                .generations(List.of(new org.springframework.ai.chat.model.Generation(am)))
-                .metadata(cr.getMetadata())
-                .build();
-    }
-
-    /** 无工具模式过滤：只过滤 null/空，保留段落分隔 */
-    private static boolean isNotEmpty(ChatResponse cr) {
-        if (cr == null || cr.getResults().isEmpty()) return false;
-        AssistantMessage am = cr.getResult().getOutput();
-        String text = am.getText();
-        return text != null && !text.isEmpty();
-    }
-
-    private LlmResponse toLlmResponse(ChatResponse cr, ReasoningAccumulator acc) {
-        if (cr == null || cr.getResults().isEmpty()) {
-            return LlmResponse.builder().build();
-        }
-        AssistantMessage am = cr.getResult().getOutput();
-        String rawText = am.getText();
-        boolean firstVisibleContent = (rawText != null && !rawText.isEmpty()) || !am.getToolCalls().isEmpty();
-        String textPrefix = reasoningPrefix(acc, firstVisibleContent);
-        String text = textPrefix + (rawText == null ? "" : rawText);
-
-        // 单轮模式：工具调用转 <tool_calls> 文本标签（每行一个 JSON），不生成 FunctionCall part。
-        // ADK 看不到 function call → 本次 runAsync() 一轮即止，工具执行由 Case 层显式接管。
-        if (singleTurnMode && !am.getToolCalls().isEmpty()) {
-            StringBuilder sb = new StringBuilder(text);
-            sb.append("\n<tool_calls>\n");
-            for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
-                if ("function".equals(tc.type())) {
-                    // tc.arguments() 已是合法 JSON 字符串（Spring AI 解析产物），直接嵌入
-                    sb.append("{\"name\":\"").append(tc.name())
-                            .append("\",\"args\":").append(tc.arguments()).append("}\n");
-                }
-            }
-            sb.append("</tool_calls>\n");
-            return LlmResponse.builder()
-                    .content(Content.builder().role("model").parts(List.of(Part.fromText(sb.toString()))).build())
-                    .build();
-        }
-
+    /**
+     * 聚合事件（一次 LLM 调用一条，partial=null → Runner 持久化）：
+     * 文本部分 = 隐藏草稿标记前缀（如有草稿）+ 已发出分片文本；随后是全部 FunctionCall parts；
+     * usageMetadata 随事件落库（压缩引擎据此触发）。
+     */
+    private Flowable<LlmResponse> buildAggregated(ReasoningAccumulator reasoningAcc,
+                                                  StreamAccumulator acc,
+                                                  AtomicReference<Usage> usageRef) {
         List<Part> parts = new ArrayList<>();
-        if (text != null && !text.isEmpty()) {
-            parts.add(Part.fromText(text));
+        boolean hasReasoning = reasoningAcc.seen && reasoningAcc.reasoning.length() > 0;
+        String visible = acc.visible.toString();
+        if (hasReasoning || !visible.isEmpty()) {
+            String prefix = hasReasoning ? ReasoningTagUtil.wrap(reasoningAcc.reasoning.toString()) : "";
+            parts.add(Part.fromText(prefix + visible));
         }
-        for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
-            if ("function".equals(tc.type())) {
-                try {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> args = MAPPER.readValue(tc.arguments(), Map.class);
-                    parts.add(Part.builder().functionCall(
-                            FunctionCall.builder().id(tc.id()).name(tc.name()).args(args).build()).build());
-                } catch (Exception ignored) {}
+        for (AssistantMessage.ToolCall tc : acc.toolCallList()) {
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> args = MAPPER.readValue(tc.arguments(), Map.class);
+                parts.add(Part.builder().functionCall(
+                        FunctionCall.builder().id(tc.id()).name(tc.name()).args(args).build()).build());
+            } catch (Exception ignored) {
             }
         }
-        return LlmResponse.builder()
-                .content(Content.builder().role("model").parts(parts).build())
-                .build();
+        if (parts.isEmpty()) {
+            // 无可见文本、无草稿、无工具调用（如仅 usage 的空流）——不产出事件
+            return Flowable.empty();
+        }
+        LlmResponse.Builder builder = LlmResponse.builder()
+                .content(Content.builder().role("model").parts(parts).build());
+        if (usageRef != null && usageRef.get() != null) {
+            GenerateContentResponseUsageMetadata meta = toUsageMetadata(usageRef.get());
+            if (meta != null) {
+                builder.usageMetadata(meta);
+            }
+        }
+        logUsage(usageRef != null ? usageRef.get() : null);
+        return Flowable.just(builder.build());
     }
 
     private static String extractModelName(Object model) {

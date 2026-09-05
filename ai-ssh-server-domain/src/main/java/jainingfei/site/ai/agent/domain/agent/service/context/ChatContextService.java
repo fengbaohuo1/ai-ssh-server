@@ -1,6 +1,7 @@
 package jainingfei.site.ai.agent.domain.agent.service.context;
 
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.MilestoneVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.PromptContextVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.context.provider.ContextProvider;
@@ -131,5 +132,69 @@ public class ChatContextService implements IChatContextService {
     @Override
     public List<String> getToolResultTimeline(String sessionId, int fromIndex) {
         return sessionId == null ? List.of() : toolResultProvider.timelineSince(sessionId, fromIndex);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  会话级运行状态（V3 托管循环）
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 最近执行命令缓存：sessionId → FIFO 队列（上限 20） */
+    private static final int MAX_RECENT_COMMANDS = 20;
+    private final java.util.Map<String, java.util.ArrayDeque<String>> recentCommands = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 会话当前意图 */
+    private final java.util.Map<String, IntentResultVO> sessionIntents = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 会话待注入意图修正提示（下回合消费） */
+    private final java.util.Map<String, String> pendingCorrections = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @Override
+    public void pushRecentCommand(String sessionId, String command) {
+        if (sessionId == null || command == null || command.trim().isEmpty()) {
+            return;
+        }
+        java.util.ArrayDeque<String> queue = recentCommands.computeIfAbsent(sessionId, k -> new java.util.ArrayDeque<>());
+        synchronized (queue) {
+            if (queue.size() >= MAX_RECENT_COMMANDS) {
+                queue.removeFirst();
+            }
+            queue.addLast(command.trim());
+        }
+    }
+
+    @Override
+    public List<String> getRecentCommands(String sessionId) {
+        if (sessionId == null) {
+            return List.of();
+        }
+        java.util.ArrayDeque<String> queue = recentCommands.get(sessionId);
+        if (queue == null) {
+            return List.of();
+        }
+        synchronized (queue) {
+            return List.copyOf(queue);
+        }
+    }
+
+    @Override
+    public void setSessionIntent(String sessionId, IntentResultVO intent) {
+        if (sessionId != null) {
+            sessionIntents.put(sessionId, intent);
+        }
+    }
+
+    @Override
+    public IntentResultVO getSessionIntent(String sessionId) {
+        return sessionId == null ? null : sessionIntents.get(sessionId);
+    }
+
+    @Override
+    public void setPendingIntentCorrection(String sessionId, String correction) {
+        if (sessionId != null && correction != null && !correction.isEmpty()) {
+            pendingCorrections.put(sessionId, correction);
+        }
+    }
+
+    @Override
+    public String consumePendingIntentCorrection(String sessionId) {
+        return sessionId == null ? null : pendingCorrections.remove(sessionId);
     }
 }

@@ -7,6 +7,7 @@ import com.google.genai.types.Schema;
 import com.google.genai.types.Type;
 import io.reactivex.rxjava3.core.Single;
 import jakarta.annotation.Resource;
+import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshTerminalService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Scope;
@@ -94,6 +95,10 @@ public class SshExecuteAdkTool extends BaseTool {
                 .build());
     }
 
+    /** 工具输出模型可见/落库上限（head/tail 保留，W3 治理；V3 托管循环下该文本会以
+     * FunctionResponse 形式进入下一轮 LLM 请求与 Session，超出部分对模型无价值且撑预算） */
+    private static final int MAX_TOOL_OUTPUT_LENGTH = 4000;
+
     @Override
     public Single<Map<String, Object>> runAsync(Map<String, Object> args, ToolContext toolContext) {
         return Single.fromCallable(() -> execute(args, toolContext));
@@ -177,7 +182,9 @@ public class SshExecuteAdkTool extends BaseTool {
             log.info("[EXEC] SSH执行完成: outputLength={}", output.length());
 
             boolean success = isExecutionSuccessful(output);
-            return result(success, command, output, success ? null : analyzeError(output));
+            // W3 head/tail 保留 + 精确省略计数：命令输出超限时模型只看到首尾（页脚提示可要求补充）
+            String boundedOutput = TextRetentionUtil.retainHeadTail(output, MAX_TOOL_OUTPUT_LENGTH);
+            return result(success, command, boundedOutput, success ? null : analyzeError(output));
 
         } catch (Exception e) {
             log.error("[EXEC] 异常: connectionId={} command={}", connectionId, command, e);
