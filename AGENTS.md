@@ -43,9 +43,9 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 - [长期记忆与对话持久化——教程 2-8 吸收落地](D:\study\notes\ai-ssh\长期记忆与对话持久化——教程%202-8%20吸收落地.md) — 吸收教程 2-8：4 张表（chat_session/chat_message/chat_milestone/long_term_memory）、消息流经时规则提取 4 类记忆、UNIQUE 键去重 + hit_count、粗筛精排召回、节点挂钩旁路写入、冷启动恢复与会话连续性、顺带修复 3 个 bug（工具摘要注入缺席/回灌累积上限/会话连续性）
 - [上下文策略的代际演进与场景适配——设计讨论复盘](D:\study\notes\ai-ssh\上下文策略的代际演进与场景适配——设计讨论复盘.md) — 2-8 前后设计讨论沉淀：记忆价值=重观察代价、轨迹 vs 里程碑分工、正则长尾实测（Redis 正则与 9 种版本输出）、order=25 隐性契约、每轮裁剪 vs 阈值压缩、SaaS vs 本地 Agent 保守分层；附项目待优化清单
 - [缓存命中与推理强度——教程 2-9 吸收落地](D:\study\notes\ai-ssh\缓存命中与推理强度——教程%202-9%20吸收落地.md) — 吸收教程 2-9：reasoning-effort 配置链路、streamUsage + usage/缓存命中观测（spring-ai 2.0.0 适配）、动态上下文前缀→后缀全套翻转（净化落库字节不变论证）、会话治理参数化、工具输出 head/tail 保留
-- [托管循环回归与上下文预算化压缩——架构反思落地](D:\study\notes\ai-ssh\托管循环回归与上下文预算化压缩——架构反思落地.md) — 撤销显式 ReAct 循环（V3）：ADK Runner 内部循环回归（FixedSpringAI partial/聚合语义、聚合事件一条一落库）、五节点案例链路删除与回合级编排 + 事件中继、上下文长度管理升级落在 ADK 1.9 原生事件压缩（EventsCompactionConfig + 确定性摘要器 P4.1）、回归驱动修复三连（tool 消息配对 400 / text must not be null / 聚合去重 / part 结构化截断）
+- [托管循环回归与上下文预算化压缩——架构反思落地](D:\study\notes\ai-ssh\托管循环回归与上下文预算化压缩——架构反思落地.md) — 撤销显式 ReAct 循环（V3）：ADK Runner 内部循环回归（FixedSpringAI partial/聚合语义、聚合事件一条一落库）、案例层按教学项目恢复**节点链路**（Root→AiCall→ToolCall→LoopDecision→UserFeedback 回合流水线，无循环回跳；AiCall 事件中继、ToolCall 回合后置工具治理、UserFeedback 收口落库）、上下文长度管理升级落在 ADK 1.9 原生事件压缩（EventsCompactionConfig + 确定性摘要器 P4.1）、回归驱动修复三连（tool 消息配对 400 / text must not be null / 聚合去重 / part 结构化截断）
 - [上下文长度管理升级——预算化、工具输出治理与 compact 引擎设计稿](D:\study\notes\ai-ssh\上下文长度管理升级——预算化、工具输出治理与%20compact%20引擎设计稿.md) — 主流 compact 对照（dsh 本机源码实证：thresholdRatio 0.8/retainRatio 0.16/checkpoint/tool-pairing）、W2 参数化与 W3 head/tail 已落地、W4 compact 引擎设计稿（预算触发、折叠回填、切割点平衡、写回机制）——已按 ADK 原生事件压缩落地（P4.1）
-- 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉、显式 ReAct 五节点链路删除（V3 托管循环回归，代码见 git 历史与《托管循环回归与上下文预算化压缩》）
+- 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉、显式 ReAct "每轮循环跳转"语义删除（V3 托管循环回归，代码见 git 历史与《托管循环回归与上下文预算化压缩》）；案例层以教学式节点链路（回合流水线）重建（V3.1）
 
 ### 核心 API
 
