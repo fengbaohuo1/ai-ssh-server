@@ -15,6 +15,7 @@ import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Single;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.model.SessionSnapshot;
+import jainingfei.site.ai.agent.domain.agent.support.ReasoningTagUtil;
 import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -168,7 +169,9 @@ public class CustomAdkSessionService implements BaseSessionService {
         } else if ("tool".equalsIgnoreCase(role)) {
             normalized = truncateEventText(normalized, maxToolText);
         } else if (isAssistantRole(role)) {
-            normalized = truncateEventText(normalized, maxAssistantText);
+            // assistant 事件可能携带"隐藏草稿标记"（DeepSeek thinking 草稿随文本落库）：
+            // 限长只作用于可见正文，标记区（base64 草稿）不参与 head/tail 截断，防止标记损坏
+            normalized = truncateAssistantEvent(normalized);
             // 流式 assistant 碎片合并：FixedSpringAI 每收到一个流式 chunk 就产出一个
             // LlmResponse → ADK 落一条 assistant 事件。若不合并，一条完整回复会被碎成
             // 几十条 1-3 字的事件——既撑爆 MAX_EVENTS 把早期 user 消息削掉，又让请求出现
@@ -187,6 +190,12 @@ public class CustomAdkSessionService implements BaseSessionService {
         mergeStateDelta(snapshot, normalized);
         trimEvents(snapshot.getRawEvents());
         snapshot.setLastUpdateTime(resolveUpdateTime(normalized));
+        // 同步到 Runner 传入的 session 对象（ADK 1.9 起 Contents 等每步从该对象读事件；
+        // 官方 InMemorySessionService 同样通过 BaseSessionService.super.appendEvent 直接 add，
+        // 而我们治理的 snapshot 与 getSession 拷贝的 events 是不同实例，须双写）
+        if (session.events() != snapshot.getRawEvents()) {
+            session.events().add(normalized);
+        }
 
         return Single.just(normalized);
     }
@@ -218,7 +227,7 @@ public class CustomAdkSessionService implements BaseSessionService {
         }
         String merged = prevText + incText;
         if (merged.length() > maxAssistantText) {
-            merged = TextRetentionUtil.retainHeadTail(merged, maxAssistantText);
+            merged = limitAssistantText(merged);
         }
         Content content = prev.content().orElse(Content.builder().role(resolveRole(prev)).build());
         String role = content.role().orElse(resolveRole(prev));
@@ -407,6 +416,39 @@ public class CustomAdkSessionService implements BaseSessionService {
                 || t.startsWith("[新增关键事件]")
                 || t.startsWith("[工具执行记录]")
                 || t.startsWith("[用户意图已修正]");
+    }
+
+    /**
+     * assistant 事件限长：隐藏草稿标记区（DeepSeek reasoning_content 随文本落库）不参与
+     * head/tail 截断——只对可见正文限长，避免截断损坏 base64 标记导致下轮无法解析草稿。
+     */
+    private Event truncateAssistantEvent(Event event) {
+        String text = event.stringifyContent();
+        if (text == null || text.length() <= maxAssistantText) {
+            return event;
+        }
+        String limited = limitAssistantText(text);
+        Event truncated = event.toBuilder().build();
+        Content content = truncated.content().orElse(null);
+        String role = content == null ? "assistant" : content.role().orElse("assistant");
+        truncated.setContent(Content.builder()
+                .role(role)
+                .parts(List.of(Part.fromText(limited)))
+                .build());
+        return truncated;
+    }
+
+    /** 文本版：草稿标记区原样保留，仅对可见正文做 head/tail 限长 */
+    private String limitAssistantText(String text) {
+        String[] parsed = ReasoningTagUtil.parse(text);
+        if (parsed[0] == null || parsed[1] == null) {
+            return TextRetentionUtil.retainHeadTail(text, maxAssistantText);
+        }
+        String visible = parsed[1];
+        String limitedVisible = visible.length() > maxAssistantText
+                ? TextRetentionUtil.retainHeadTail(visible, maxAssistantText)
+                : visible;
+        return ReasoningTagUtil.wrap(parsed[0]) + limitedVisible;
     }
 
     /** 截断过长的事件文本——head/tail 保留 + 省略计数，框架层 Session 保留"够用信息"，不无上限保存完整原文 */

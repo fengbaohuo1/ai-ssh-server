@@ -19,6 +19,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.AiAgentAuto
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
+import jainingfei.site.ai.agent.domain.agent.support.ReasoningTagUtil;
 import jainingfei.site.ai.agent.domain.ssh.model.aggregate.SshConnectionAggregate;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshConnectionService;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
@@ -148,7 +149,7 @@ public class ChatService implements IChatService {
         Flowable<Event> events = runner.runAsync(userId, sessionId, userMsg,
                 RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
         List<String> outputs = new ArrayList<>();
-        events.blockingForEach(event -> outputs.add(event.stringifyContent()));
+        events.blockingForEach(event -> outputs.add(eventText(event)));
 
         return outputs;
     }
@@ -245,8 +246,16 @@ public class ChatService implements IChatService {
         Flowable<Event> events = runner.runAsync(chatCommandEntity.getUserId(), sessionId, content,
                 RunConfig.builder().streamingMode(RunConfig.StreamingMode.SSE).build());
         List<String> outputs = new ArrayList<>();
-        events.blockingForEach(event -> outputs.add(event.stringifyContent()));
+        events.blockingForEach(event -> outputs.add(eventText(event)));
         return outputs;
+    }
+
+    /**
+     * 事件文本提取：剥离 DeepSeek 思考草稿隐藏标记（草稿只随会话事件落库供回传，
+     * 不出现在同步对话的返回文本/展示层）。
+     */
+    private static String eventText(Event event) {
+        return ReasoningTagUtil.strip(event.stringifyContent());
     }
 
     /**

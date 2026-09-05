@@ -19,6 +19,7 @@ import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
+import jainingfei.site.ai.agent.domain.agent.support.ReasoningTagUtil;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -336,10 +337,12 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         // 剥离标签后的纯文本 → SSE text（标签不展示给前端）
         // 注意：不能 trim——chunk 尾部的换行是模型的真实输出（表格/段落分隔），trim 会杀光换行
         String clean = TOOL_CALLS_BLOCK.matcher(raw).replaceAll("");
-        if (!clean.isEmpty()) {
-            textAccumulator.append(clean).append("\n");
-            ctx.getAssistantContent().append(clean).append("\n");
-            sendText(emitter, clean, textAccumulator.toString(), null);
+        // 再剥离 DeepSeek 思考草稿隐藏标记（草稿只随会话事件落库供下轮回传，不展示给用户）
+        String display = ReasoningTagUtil.strip(clean);
+        if (!display.isEmpty()) {
+            textAccumulator.append(display).append("\n");
+            ctx.getAssistantContent().append(display).append("\n");
+            sendText(emitter, display, textAccumulator.toString(), null);
         }
     }
 

@@ -15,17 +15,17 @@ import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.StreamingChatModel;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.deepseek.DeepSeekChatModel;
+import org.springframework.ai.deepseek.DeepSeekChatOptions;
+import org.springframework.ai.deepseek.api.DeepSeekApi;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
-import java.util.Map;
+import java.util.Locale;
 
 /**
  * 大模型 + 工具装配节点。
@@ -33,7 +33,8 @@ import java.util.Map;
  * <b>架构</b>：MCP 三类工厂（remote/stdio/local）产出 {@link BaseToolset} → ADK。
  * Spring AI 只负责通信，ADK 负责工具循环 + 编排。
  * <p>
- * V2.1: 升级 ADK 1.6.0，移除 OpenAiChatModelAdapter + AgentStepBuffer。
+ * V2.2: 主模型切换到 spring-ai-deepseek 2.0.1 原生供应商（DeepSeek thinking 模式官方支持，
+ * reasoning_content 捕获/回传走 DeepSeekAssistantMessage，替代 OpenAI 兼容层）。
  */
 @Slf4j
 @Service
@@ -75,27 +76,28 @@ public class ChatModelNode extends AbstractArmorySupport {
             log.info("Skills → BaseToolset");
         }
 
-        // 3. ChatModel
-        OpenAiChatOptions.Builder optionsBuilder = OpenAiChatOptions.builder()
-                .baseUrl(chatModelConfig.getBaseUrl()).apiKey(chatModelConfig.getApiKey())
-                .model(chatModelConfig.getModel())
-                // 开启流式 usage 统计：OpenAI 协议要求 stream_options.include_usage=true，
-                // 末块才返回完整 usage（含 prompt_tokens_details.cached_tokens 缓存命中）
-                .streamUsage(true)
-                // DeepSeek thinking 模式兼容：关闭思考，避免"流式+工具+thinking 历史"触发
-                // reasoning_content 回传 400（详见 ChatModelFix 上方说明）
-                .extraBody(THINKING_DISABLED);
+        // 3. ChatModel（DeepSeek 原生供应商：thinking 默认开启，reasoning_content 官方捕获/回传）
+        DeepSeekApi deepSeekApi = DeepSeekApi.builder()
+                .baseUrl(chatModelConfig.getBaseUrl())
+                .apiKey(chatModelConfig.getApiKey())
+                .build();
+        DeepSeekChatOptions.Builder optionsBuilder = DeepSeekChatOptions.builder()
+                .model(resolveChatModel(chatModelConfig.getModel()));
 
-        // 推理强度（仅推理模型生效，非推理模型忽略）
+        // 推理强度（仅推理模型生效；deepseek 枚举仅 HIGH/MAX，可配置时按需映射）
         String reasoningEffort = chatModelConfig.getReasoningEffort();
         if (StringUtils.isNotBlank(reasoningEffort)) {
-            optionsBuilder.reasoningEffort(reasoningEffort);
+            resolveReasoningEffort(reasoningEffort).ifPresent(optionsBuilder::reasoningEffort);
         }
 
-        dynamicContext.setChatModel(new ChatModelFix(
-                OpenAiChatModel.builder().options(optionsBuilder.build()).build()));
+        dynamicContext.setChatModel(new DeepSeekChatModelFix(
+                DeepSeekChatModel.builder()
+                        .deepSeekApi(deepSeekApi)
+                        .options(optionsBuilder.build())
+                        .build()));
 
-        log.info("ChatModelNode 装配完成, mcpToolsets:{}", dynamicContext.getMcpToolsets().size());
+        log.info("ChatModelNode 装配完成（DeepSeek 原生通道，thinking 开启）, mcpToolsets:{}",
+                dynamicContext.getMcpToolsets().size());
         return router(requestParameter, dynamicContext);
     }
 
@@ -104,43 +106,54 @@ public class ChatModelNode extends AbstractArmorySupport {
         return agentNode;
     }
 
-    // ==== 内部：修正 ADK MessageConverter 产出非 OpenAiChatOptions 的 ClassCastException ====
+    /** yml 模型名 → DeepSeek 枚举（deepseek-v4-flash → DEEPSEEK_V4_FLASH），未知名回退默认并告警 */
+    private static DeepSeekApi.ChatModel resolveChatModel(String model) {
+        if (StringUtils.isNotBlank(model)) {
+            try {
+                return DeepSeekApi.ChatModel.valueOf(model.trim().toUpperCase(Locale.ROOT).replace('-', '_'));
+            } catch (IllegalArgumentException e) {
+                log.warn("未知 DeepSeek 模型名 [{}]，回退默认模型", model);
+            }
+        }
+        return DeepSeekApi.ChatModel.DEEPSEEK_V4_FLASH;
+    }
 
-    /**
-     * DeepSeek thinking 模式适配（实测定位，2026-09）：
-     * <p>deepseek-v4-flash 默认开启 thinking（响应带 reasoning_content）。OpenAI 兼容协议要求
-     * 多轮续接时把历史 assistant 的 reasoning_content 原样回传，而 spring-ai 2.0.0 既不解析
-     * 也不回传该字段——当请求同时满足「流式 + 工具声明 + 历史含 thinking 回复」时服务端直接
-     * 400：reasoning_content in the thinking mode must be passed back。
-     * <p>解决：统一关闭 thinking（不产生 reasoning_content，自然无需回传）。若模型/网关不支持
-     * 该参数会被忽略；将来需要思考能力时，须自研消息层完成 reasoning_content 的捕获与回传。
-     */
-    private static final Map<String, Object> THINKING_DISABLED = Map.of("thinking", Map.of("type", "disabled"));
+    /** 推理强度字符串 → DeepSeek 枚举（当前仅 HIGH/MAX），不识别时忽略 */
+    private static java.util.Optional<DeepSeekApi.ChatCompletionRequest.ReasoningEffort> resolveReasoningEffort(String effort) {
+        try {
+            return java.util.Optional.of(DeepSeekApi.ChatCompletionRequest.ReasoningEffort
+                    .valueOf(effort.trim().toUpperCase(Locale.ROOT)));
+        } catch (IllegalArgumentException e) {
+            log.warn("未知推理强度 [{}]，忽略（DeepSeek 支持: {}", effort,
+                    java.util.Arrays.toString(DeepSeekApi.ChatCompletionRequest.ReasoningEffort.values()));
+            return java.util.Optional.empty();
+        }
+    }
 
-    private static class ChatModelFix implements ChatModel, StreamingChatModel {
-        private final OpenAiChatModel delegate;
-        private final OpenAiChatOptions defaultOptions;
-        ChatModelFix(OpenAiChatModel d) { this.delegate = d; this.defaultOptions = (OpenAiChatOptions) d.getOptions(); }
+    // ==== 内部：修正 ADK MessageConverter 产出非 DeepSeekChatOptions 的 ClassCastException ====
+    // ADK 的 Spring AI 转换层把 prompt options 交给 ChatModel 时类型不匹配，与 OpenAiChatModel
+    // 时代同源；DeepSeekChatModel.createRequest 会强转 DeepSeekChatOptions，因此工具轮次的
+    // ToolCallingChatOptions 必须以 defaultOptions 为基底合并为 DeepSeekChatOptions。
+
+    private static class DeepSeekChatModelFix implements ChatModel {
+        private final DeepSeekChatModel delegate;
+        private final DeepSeekChatOptions defaultOptions;
+        DeepSeekChatModelFix(DeepSeekChatModel d) { this.delegate = d; this.defaultOptions = (DeepSeekChatOptions) d.getOptions(); }
         @Override public ChatResponse call(Prompt p) { return delegate.call(fix(p)); }
         @Override public Flux<ChatResponse> stream(Prompt p) { return delegate.stream(fix(p)); }
         private Prompt fix(Prompt p) {
             ChatOptions o = p.getOptions();
-            if (o == null || o instanceof OpenAiChatOptions) return p;
-            // ADK 产出 ToolCallingChatOptions → 转为 OpenAiChatOptions，以 defaultOptions 为基底合并：
-            // 除 baseUrl/apiKey/model/工具声明外，reasoningEffort/streamUsage/extraBody 等装配选项
-            // 也必须透传，否则工具轮次中会静默丢失（装配节点配置的选项只存在于 defaultOptions）
+            if (o == null || o instanceof DeepSeekChatOptions) return p;
+            // ADK 产出 ToolCallingChatOptions → 转为 DeepSeekChatOptions：透传模型与工具声明
             ToolCallingChatOptions t = (ToolCallingChatOptions) o;
-            OpenAiChatOptions.Builder merged = OpenAiChatOptions.builder()
-                    .baseUrl(defaultOptions.getBaseUrl()).apiKey(defaultOptions.getApiKey())
+            DeepSeekChatOptions.Builder merged = DeepSeekChatOptions.builder()
                     .model(defaultOptions.getModel())
-                    .toolCallbacks(t.getToolCallbacks())
-                    .extraBody(THINKING_DISABLED);
-            if (StringUtils.isNotBlank(defaultOptions.getReasoningEffort())) {
-                merged.reasoningEffort(defaultOptions.getReasoningEffort());
+                    .toolCallbacks(t.getToolCallbacks());
+            if (defaultOptions.getThinking() != null) {
+                merged.thinking(defaultOptions.getThinking());
             }
-            if (defaultOptions.getStreamOptions() != null
-                    && Boolean.TRUE.equals(defaultOptions.getStreamOptions().includeUsage())) {
-                merged.streamUsage(true);
+            if (defaultOptions.getReasoningEffort() != null) {
+                merged.reasoningEffort(defaultOptions.getReasoningEffort());
             }
             return new Prompt(p.getInstructions(), merged.build());
         }

@@ -26,8 +26,11 @@ import org.springframework.ai.tool.ToolCallback;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.completions.CompletionUsage;
+import jainingfei.site.ai.agent.domain.agent.support.ReasoningTagUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
+import org.springframework.ai.deepseek.api.DeepSeekApi;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -79,39 +82,82 @@ public class FixedSpringAI extends BaseLlm {
     public Flowable<LlmResponse> generateContent(LlmRequest req, boolean stream) {
         try {
             Prompt prompt = toPrompt(req);
+            // 每次模型调用独立的草稿累积器（DeepSeek thinking：草稿分片先于正文到达）
+            ReasoningAccumulator reasoningAcc = new ReasoningAccumulator();
             if (stream && streamingChatModel != null) {
                 boolean hasTools = req.tools() != null && !req.tools().isEmpty();
 
-                // 流式 usage 只在末块返回（需装配层 streamUsage=true），且末块通常无文本——
-                // 会被下方空白过滤/缓冲逻辑丢弃，因此在过滤之前观察每个 chunk，
-                // 记录最后一次出现的 usage，待流结束后统一输出（含缓存命中 token 数）
+                // 流式 usage 只在末块返回，且末块通常无文本——会被下方空白过滤/缓冲逻辑丢弃，
+                // 因此在过滤之前观察每个 chunk，记录最后一次出现的 usage，流结束后统一输出
                 AtomicReference<Usage> usageRef = new AtomicReference<>();
+                // 同时在过滤前捕获 DeepSeek 思考草稿分片（reasoning chunk 文本为空，不进正文流）
                 Flowable<ChatResponse> observed = Flowable.fromPublisher(
-                        streamingChatModel.stream(prompt).doOnNext(cr -> observeUsage(cr, usageRef)));
+                                streamingChatModel.stream(prompt))
+                        .doOnNext(cr -> observeUsage(cr, usageRef))
+                        .doOnNext(cr -> captureReasoning(cr, reasoningAcc));
 
                 if (hasTools) {
-                    // 工具模式：空白 chunk 缓冲合并。
-                    // 真实换行（Markdown 表格/段落的分隔）是独立空白 chunk——缓冲后随下一文本 chunk
-                    // 一起发出，完整保留；工具调用 chunk 到达时丢弃缓冲（phantom 空白过滤）。
+                    // 工具模式：空白 chunk 缓冲合并（phantom 空白过滤），真实换行保留
                     AtomicReference<String> pendingWs = new AtomicReference<>("");
                     return observed
                             .flatMap(cr -> mergeWhitespace(cr, pendingWs))
-                            .map(this::toLlmResponse)
+                            .map(cr -> toLlmResponse(cr, reasoningAcc))
                             .doOnComplete(() -> logUsage(usageRef.get()));
                 }
 
                 // 无工具模式：只过滤 null/空，保留段落分隔
                 return observed
                         .filter(FixedSpringAI::isNotEmpty)
-                        .map(this::toLlmResponse)
+                        .map(cr -> toLlmResponse(cr, reasoningAcc))
                         .doOnComplete(() -> logUsage(usageRef.get()));
             }
             ChatResponse resp = chatModel.call(prompt);
             logUsage(resp.getMetadata() != null ? resp.getMetadata().getUsage() : null);
-            return Flowable.just(toLlmResponse(resp));
+            // 同步路径一次拿全量响应：先捕获草稿再注入（与流式路径一致）
+            captureReasoning(resp, reasoningAcc);
+            return Flowable.just(toLlmResponse(resp, reasoningAcc));
         } catch (Exception e) {
             return Flowable.error(e);
         }
+    }
+
+    // ===== DeepSeek 思考草稿（reasoning_content）捕获与注入 =====
+
+    /** 单次模型调用的草稿状态：分片累积 + 确保只注入一次 */
+    private static final class ReasoningAccumulator {
+        final StringBuilder reasoning = new StringBuilder();
+        boolean seen = false;
+        boolean injected = false;
+    }
+
+    /**
+     * 从流式 chunk 捕获思考草稿分片（原生 DeepSeek 通道的 DeepSeekAssistantMessage 携带
+     * reasoningContent；OpenAI 兼容通道无此类型则自然跳过）。
+     */
+    private static void captureReasoning(ChatResponse cr, ReasoningAccumulator acc) {
+        if (cr == null || cr.getResults().isEmpty()) {
+            return;
+        }
+        if (cr.getResult().getOutput() instanceof DeepSeekAssistantMessage ds) {
+            String frag = ds.getReasoningContent();
+            if (frag != null && !frag.isEmpty()) {
+                acc.seen = true;
+                acc.reasoning.append(frag);
+            }
+        }
+    }
+
+    /**
+     * 首个"可见内容"chunk 到达时，把已聚合的完整草稿以隐藏标记前缀注入该 chunk 文本
+     * （DeepSeek 的思考分片总是先于正文/工具调用分片到达）。标记随 assistant 事件文本落库，
+     * 下一轮重建历史时解析并放回 DeepSeekAssistantMessage.reasoningContent（L2 草稿延续）。
+     */
+    private static String reasoningPrefix(ReasoningAccumulator acc, boolean firstVisibleContent) {
+        if (firstVisibleContent && acc.seen && !acc.injected && acc.reasoning.length() > 0) {
+            acc.injected = true;
+            return ReasoningTagUtil.wrap(acc.reasoning.toString());
+        }
+        return "";
     }
 
     // ===== Usage 观测（教程 2-9：缓存命中可验证） =====
@@ -155,6 +201,11 @@ public class FixedSpringAI extends BaseLlm {
                         .flatMap(CompletionUsage.PromptTokensDetails::cachedTokens)
                         .orElse(null);
             }
+            // DeepSeek 原生通道（spring-ai-deepseek 2.0.1）
+            if (nativeUsage instanceof DeepSeekApi.Usage dsUsage) {
+                DeepSeekApi.Usage.PromptTokensDetails details = dsUsage.promptTokensDetails();
+                return details != null ? details.cachedTokens().longValue() : null;
+            }
         } catch (Exception e) {
             log.debug("提取缓存命中 token 失败: {}", e.getMessage());
         }
@@ -187,7 +238,11 @@ public class FixedSpringAI extends BaseLlm {
                     break;
                 case "model":
                 case "assistant":
-                    messages.add(toAssistantMessage(content));
+                    // DeepSeek thinking：历史 assistant 必须携带 reasoning_content 回传。
+                    // 事件文本含隐藏草稿标记 → 解析后构造 DeepSeekAssistantMessage；
+                    // 无草稿（旧会话/标记损坏）→ 跳过该条历史（宁可丢上轮回复文本，
+                    // 工具结果/上下文都在 user 消息里，也不触发服务端 400）
+                    messages.addAll(toHistoryAssistantMessages(content));
                     break;
                 default:
                     messages.addAll(toUserMessages(content));
@@ -242,7 +297,12 @@ public class FixedSpringAI extends BaseLlm {
         return list;
     }
 
-    private AssistantMessage toAssistantMessage(Content content) {
+    /**
+     * 历史 assistant 事件 → spring-ai 消息列表（0 或 1 条）：
+     * 解析事件文本中的隐藏草稿标记，构造 {@link DeepSeekAssistantMessage}（草稿放
+     * reasoningContent、正文放 content）；无草稿时返回空列表（跳过该条历史）。
+     */
+    private List<Message> toHistoryAssistantMessages(Content content) {
         StringBuilder text = new StringBuilder();
         List<AssistantMessage.ToolCall> toolCalls = new ArrayList<>();
 
@@ -261,10 +321,21 @@ public class FixedSpringAI extends BaseLlm {
             }
         }
 
-        if (toolCalls.isEmpty()) {
-            return new AssistantMessage(text.toString());
+        String raw = text.toString();
+        String[] parsed = ReasoningTagUtil.parse(raw);
+        String reasoning = parsed[0];
+        String visible = parsed[1] == null ? "" : parsed[1];
+        if (reasoning == null) {
+            // 无草稿：整条跳过（DeepSeek thinking+工具场景的历史 assistant 必须带草稿回传）
+            return List.of();
         }
-        return AssistantMessage.builder().content(text.toString()).toolCalls(toolCalls).build();
+        DeepSeekAssistantMessage.Builder builder = DeepSeekAssistantMessage.builder()
+                .content(visible)
+                .reasoningContent(reasoning);
+        if (!toolCalls.isEmpty()) {
+            builder.toolCalls(toolCalls);
+        }
+        return List.of(builder.build());
     }
 
     // ===== ChatResponse → LlmResponse =====
@@ -323,34 +394,37 @@ public class FixedSpringAI extends BaseLlm {
         return text != null && !text.isEmpty();
     }
 
-    private LlmResponse toLlmResponse(ChatResponse cr) {
+    private LlmResponse toLlmResponse(ChatResponse cr, ReasoningAccumulator acc) {
         if (cr == null || cr.getResults().isEmpty()) {
             return LlmResponse.builder().build();
         }
         AssistantMessage am = cr.getResult().getOutput();
         String rawText = am.getText();
+        boolean firstVisibleContent = (rawText != null && !rawText.isEmpty()) || !am.getToolCalls().isEmpty();
+        String textPrefix = reasoningPrefix(acc, firstVisibleContent);
+        String text = textPrefix + (rawText == null ? "" : rawText);
 
         // 单轮模式：工具调用转 <tool_calls> 文本标签（每行一个 JSON），不生成 FunctionCall part。
         // ADK 看不到 function call → 本次 runAsync() 一轮即止，工具执行由 Case 层显式接管。
         if (singleTurnMode && !am.getToolCalls().isEmpty()) {
-            StringBuilder text = new StringBuilder(rawText == null ? "" : rawText);
-            text.append("\n<tool_calls>\n");
+            StringBuilder sb = new StringBuilder(text);
+            sb.append("\n<tool_calls>\n");
             for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
                 if ("function".equals(tc.type())) {
                     // tc.arguments() 已是合法 JSON 字符串（Spring AI 解析产物），直接嵌入
-                    text.append("{\"name\":\"").append(tc.name())
+                    sb.append("{\"name\":\"").append(tc.name())
                             .append("\",\"args\":").append(tc.arguments()).append("}\n");
                 }
             }
-            text.append("</tool_calls>\n");
+            sb.append("</tool_calls>\n");
             return LlmResponse.builder()
-                    .content(Content.builder().role("model").parts(List.of(Part.fromText(text.toString()))).build())
+                    .content(Content.builder().role("model").parts(List.of(Part.fromText(sb.toString()))).build())
                     .build();
         }
 
         List<Part> parts = new ArrayList<>();
-        if (rawText != null && !rawText.isEmpty()) {
-            parts.add(Part.fromText(rawText));
+        if (text != null && !text.isEmpty()) {
+            parts.add(Part.fromText(text));
         }
         for (AssistantMessage.ToolCall tc : am.getToolCalls()) {
             if ("function".equals(tc.type())) {
