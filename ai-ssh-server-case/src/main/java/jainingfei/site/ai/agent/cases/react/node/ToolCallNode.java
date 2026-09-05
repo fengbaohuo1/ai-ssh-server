@@ -11,6 +11,7 @@ import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jainingfei.site.ai.agent.domain.agent.service.intent.IntentService;
+import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -220,24 +221,19 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
     }
 
     private static String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() > max ? s.substring(0, max) + "\n... (truncated, total " + s.length() + " chars)" : s;
+        // head/tail 保留 + 精确省略计数（替代旧"掐头"）：输出头部的命令回显与尾部的最终结论
+        // 比中段信息量更大；省略标记让模型知道内容被截断，可要求补充
+        return TextRetentionUtil.retainHeadTail(s, max);
     }
 
     /**
      * 回灌结果累积上限保护（修复②）：lastToolResultText 会在下一轮整体拼入 userContent，
      * 单条结果虽已截 4000 字符，但单轮最多 10 次调用仍可累积 4 万字符。
-     * 超限保留头尾（头 4500 + 尾 3000），中段以省略标记替代——最近的输出和最老的输出
-     * 都比中段更有信息量（命令回显在头部、最终结果在尾部）。
+     * 超限保留头尾、丢弃中段——最近的输出和最老的输出都比中段更有信息量
+     * （命令回显在头部、最终结果在尾部），统一复用 {@link TextRetentionUtil}。
      */
     private static String capAccumulated(String text) {
-        if (text == null || text.length() <= MAX_ACCUMULATED_LENGTH) {
-            return text;
-        }
-        int omitted = text.length() - MAX_ACCUMULATED_LENGTH;
-        String head = text.substring(0, 4500);
-        String tail = text.substring(text.length() - 3000);
-        return head + "\n... (中间省略 " + omitted + " 字符) ...\n" + tail;
+        return TextRetentionUtil.retainHeadTail(text, MAX_ACCUMULATED_LENGTH);
     }
 
     /**
