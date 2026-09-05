@@ -25,6 +25,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 大模型 + 工具装配节点。
@@ -80,7 +81,10 @@ public class ChatModelNode extends AbstractArmorySupport {
                 .model(chatModelConfig.getModel())
                 // 开启流式 usage 统计：OpenAI 协议要求 stream_options.include_usage=true，
                 // 末块才返回完整 usage（含 prompt_tokens_details.cached_tokens 缓存命中）
-                .streamUsage(true);
+                .streamUsage(true)
+                // DeepSeek thinking 模式兼容：关闭思考，避免"流式+工具+thinking 历史"触发
+                // reasoning_content 回传 400（详见 ChatModelFix 上方说明）
+                .extraBody(THINKING_DISABLED);
 
         // 推理强度（仅推理模型生效，非推理模型忽略）
         String reasoningEffort = chatModelConfig.getReasoningEffort();
@@ -102,6 +106,17 @@ public class ChatModelNode extends AbstractArmorySupport {
 
     // ==== 内部：修正 ADK MessageConverter 产出非 OpenAiChatOptions 的 ClassCastException ====
 
+    /**
+     * DeepSeek thinking 模式适配（实测定位，2026-09）：
+     * <p>deepseek-v4-flash 默认开启 thinking（响应带 reasoning_content）。OpenAI 兼容协议要求
+     * 多轮续接时把历史 assistant 的 reasoning_content 原样回传，而 spring-ai 2.0.0 既不解析
+     * 也不回传该字段——当请求同时满足「流式 + 工具声明 + 历史含 thinking 回复」时服务端直接
+     * 400：reasoning_content in the thinking mode must be passed back。
+     * <p>解决：统一关闭 thinking（不产生 reasoning_content，自然无需回传）。若模型/网关不支持
+     * 该参数会被忽略；将来需要思考能力时，须自研消息层完成 reasoning_content 的捕获与回传。
+     */
+    private static final Map<String, Object> THINKING_DISABLED = Map.of("thinking", Map.of("type", "disabled"));
+
     private static class ChatModelFix implements ChatModel, StreamingChatModel {
         private final OpenAiChatModel delegate;
         private final OpenAiChatOptions defaultOptions;
@@ -112,13 +127,14 @@ public class ChatModelNode extends AbstractArmorySupport {
             ChatOptions o = p.getOptions();
             if (o == null || o instanceof OpenAiChatOptions) return p;
             // ADK 产出 ToolCallingChatOptions → 转为 OpenAiChatOptions，以 defaultOptions 为基底合并：
-            // 除 baseUrl/apiKey/model/工具声明外，reasoningEffort/streamUsage 等新选项也必须透传，
-            // 否则工具轮次中会静默丢失（装配节点配置的选项只存在于 defaultOptions）
+            // 除 baseUrl/apiKey/model/工具声明外，reasoningEffort/streamUsage/extraBody 等装配选项
+            // 也必须透传，否则工具轮次中会静默丢失（装配节点配置的选项只存在于 defaultOptions）
             ToolCallingChatOptions t = (ToolCallingChatOptions) o;
             OpenAiChatOptions.Builder merged = OpenAiChatOptions.builder()
                     .baseUrl(defaultOptions.getBaseUrl()).apiKey(defaultOptions.getApiKey())
                     .model(defaultOptions.getModel())
-                    .toolCallbacks(t.getToolCallbacks());
+                    .toolCallbacks(t.getToolCallbacks())
+                    .extraBody(THINKING_DISABLED);
             if (StringUtils.isNotBlank(defaultOptions.getReasoningEffort())) {
                 merged.reasoningEffort(defaultOptions.getReasoningEffort());
             }
