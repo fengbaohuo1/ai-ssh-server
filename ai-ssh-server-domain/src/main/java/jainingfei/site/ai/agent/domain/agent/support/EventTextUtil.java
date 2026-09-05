@@ -38,6 +38,10 @@ public final class EventTextUtil {
     /**
      * 提取事件文本增量（剥草稿标记；空返回 null）。聚合事件与已累积文本重复时返回 null
      * （由累积器 {@code accumulated} 判定，调用方把非 null 增量 append 进它）。
+     *
+     * <p>聚合事件（partial 为空）是本次 LLM 调用的全文（可能比已流式分片多出尾部空白等
+     * 聚合差异），按"前缀关系"取增量：等于累积 → 跳过；比累积长且以累积开头 → 只取
+     * 差额（防重复渲染/落库）；意外更短 → 视为已全覆盖丢弃（防重复，绝不整段重发）。
      */
     public static String visibleTextDelta(Event event, StringBuilder accumulated) {
         String visible = visibleText(event);
@@ -48,15 +52,21 @@ public final class EventTextUtil {
             accumulated.append(visible);
             return visible;
         }
-        // 聚合事件（partial 为空）：与已流式分片文本一致则跳过（防重复渲染/落库）
+        // 聚合事件（partial 为空）
         String current = accumulated.toString();
         if (visible.equals(current)) {
             return null;
         }
-        // 不一致（例如非流式路径只有这一条事件）——整体补充，防止丢内容
-        accumulated.setLength(0);
-        accumulated.append(visible);
-        return visible;
+        if (visible.startsWith(current)) {
+            String delta = visible.substring(current.length());
+            accumulated.append(delta);
+            return delta.isEmpty() ? null : delta;
+        }
+        // 聚合文本比已累积短（异常态）：内容已全部覆盖，丢弃防重复
+        if (current.startsWith(visible)) {
+            return null;
+        }
+        return null;
     }
 
     /** 事件可见文本（仅 text part，剥草稿标记；functionCall/functionResponse 不参与） */

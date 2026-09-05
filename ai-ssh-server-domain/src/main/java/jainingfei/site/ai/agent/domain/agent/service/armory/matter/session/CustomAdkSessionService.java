@@ -189,10 +189,13 @@ public class CustomAdkSessionService implements BaseSessionService {
         if ("user".equalsIgnoreCase(role)) {
             normalized = sanitizeUserEvent(normalized);
         } else if ("tool".equalsIgnoreCase(role)) {
-            normalized = truncateEventText(normalized, maxToolText);
+            // tool 事件的结构化截断：FunctionResponse parts 必须保留（历史重建要按 id/name
+            // 回放 tool 消息配对），只对响应里的字符串字段做 head/tail 限长
+            normalized = truncateToolEvent(normalized);
         } else if (isAssistantRole(role)) {
             // assistant 事件可能携带"隐藏草稿标记"（DeepSeek thinking 草稿随文本落库）：
-            // 限长只作用于可见正文，标记区（base64 草稿）不参与 head/tail 截断，防止标记损坏
+            // 限长只作用于可见正文，标记区（base64 草稿）不参与 head/tail 截断，防止标记损坏；
+            // 带 FunctionCall parts 的事件只限长文本部分，绝不 stringify 破坏工具调用结构
             normalized = truncateAssistantEvent(normalized);
         }
 
@@ -403,21 +406,49 @@ public class CustomAdkSessionService implements BaseSessionService {
     }
 
     /**
-     * assistant 事件限长：隐藏草稿标记区（DeepSeek reasoning_content 随文本落库）不参与
-     * head/tail 截断——只对可见正文限长，避免截断损坏 base64 标记导致下轮无法解析草稿。
+     * assistant 事件限长（结构化版本，V3）：隐藏草稿标记区（DeepSeek reasoning_content
+     * 随文本落库）不参与 head/tail 截断，避免截断损坏 base64 标记导致下轮无法解析草稿；
+     * 携带 FunctionCall parts 的事件只限长文本部分，FunctionCall parts 原样保留——
+     * 历史重建需要"完整工具调用结构 + 草稿标记"才能回传 DeepSeek，stringify 成纯文本会破坏配对。
      */
     private Event truncateAssistantEvent(Event event) {
         String text = event.stringifyContent();
         if (text == null || text.length() <= maxAssistantText) {
             return event;
         }
-        String limited = limitAssistantText(text);
+        List<Part> parts = event.content().flatMap(Content::parts).orElse(List.of());
+        boolean hasFunctionCalls = parts.stream().anyMatch(p -> p.functionCall().isPresent());
+
         Event truncated = event.toBuilder().build();
         Content content = truncated.content().orElse(null);
         String role = content == null ? "assistant" : content.role().orElse("assistant");
+
+        if (!hasFunctionCalls) {
+            // 纯文本事件：整条 marker 感知 head/tail 限长
+            truncated.setContent(Content.builder()
+                    .role(role)
+                    .parts(List.of(Part.fromText(limitAssistantText(text))))
+                    .build());
+            return truncated;
+        }
+
+        // 带 FunctionCall：只限长文本 part（marker 区不动），工具调用 parts 原样保留
+        StringBuilder visible = new StringBuilder();
+        for (Part p : parts) {
+            p.text().ifPresent(visible::append);
+        }
+        List<Part> newParts = new ArrayList<>();
+        if (visible.length() > maxAssistantText) {
+            newParts.add(Part.fromText(limitAssistantText(visible.toString())));
+        }
+        for (Part p : parts) {
+            if (p.functionCall().isPresent()) {
+                newParts.add(p);
+            }
+        }
         truncated.setContent(Content.builder()
                 .role(role)
-                .parts(List.of(Part.fromText(limited)))
+                .parts(newParts.isEmpty() ? List.of(Part.fromText(limitAssistantText(text))) : newParts)
                 .build());
         return truncated;
     }
@@ -435,21 +466,85 @@ public class CustomAdkSessionService implements BaseSessionService {
         return ReasoningTagUtil.wrap(parsed[0]) + limitedVisible;
     }
 
-    /** 截断过长的事件文本——head/tail 保留 + 省略计数，框架层 Session 保留"够用信息"，不无上限保存完整原文 */
-    private Event truncateEventText(Event event, int maxLength) {
+    /**
+     * tool 事件结构化截断（V3 托管循环）：FunctionResponse 事件必须保留 part 结构
+     * （id/name/response map）——历史重建按 part 回放成 spring-ai ToolResponseMessage 与
+     * assistant tool_calls 配对；stringify 成文本会把 JSON 截断成非法内容并丢失配对。
+     * 超预算时只对 response map 里的字符串字段做 head/tail 限长（先缩最长的字段）。
+     */
+    private Event truncateToolEvent(Event event) {
         String text = event.stringifyContent();
-        if (text == null || text.length() <= maxLength) {
+        if (text == null || text.length() <= maxToolText) {
             return event;
         }
+        List<Part> parts = event.content().flatMap(Content::parts).orElse(List.of());
+        boolean hasFunctionResponses = parts.stream().anyMatch(p -> p.functionResponse().isPresent());
+        if (!hasFunctionResponses) {
+            Event truncated = event.toBuilder().build();
+            Content content = truncated.content().orElse(null);
+            String role = content == null ? "tool" : content.role().orElse("tool");
+            truncated.setContent(Content.builder()
+                    .role(role)
+                    .parts(List.of(Part.fromText(TextRetentionUtil.retainHeadTail(text, maxToolText))))
+                    .build());
+            return truncated;
+        }
 
+        List<Part> newParts = new ArrayList<>();
+        for (Part p : parts) {
+            if (p.functionResponse().isPresent()) {
+                com.google.genai.types.FunctionResponse fr = p.functionResponse().get();
+                Map<String, Object> resp = new java.util.LinkedHashMap<>(fr.response().orElse(Map.of()));
+                capResponseStrings(resp, maxToolText);
+                newParts.add(Part.builder()
+                        .functionResponse(fr.toBuilder().response(resp).build())
+                        .build());
+            } else {
+                newParts.add(p);
+            }
+        }
         Event truncated = event.toBuilder().build();
         Content content = truncated.content().orElse(null);
-        String role = content == null ? "assistant" : content.role().orElse("assistant");
+        String role = content == null ? "tool" : content.role().orElse("tool");
         truncated.setContent(Content.builder()
                 .role(role)
-                .parts(List.of(Part.fromText(TextRetentionUtil.retainHeadTail(text, maxLength))))
+                .parts(newParts)
                 .build());
         return truncated;
+    }
+
+    /** 把 response map 的字符串字段总长压到预算内（保留每字段 JSON 键开销；优先收缩最长字段） */
+    private static void capResponseStrings(Map<String, Object> resp, int budget) {
+        List<Map.Entry<String, Object>> strings = resp.entrySet().stream()
+                .filter(e -> e.getValue() instanceof String)
+                .toList();
+        int overhead = (resp.size() - strings.size()) * 48 + strings.size() * 32;
+        int usable = Math.max(budget - overhead, 200);
+        int total = 0;
+        for (Map.Entry<String, Object> e : strings) {
+            total += ((String) e.getValue()).length();
+        }
+        for (int round = 0; round < 4 && total > usable; round++) {
+            Map.Entry<String, Object> longest = null;
+            int longestLen = 0;
+            for (Map.Entry<String, Object> e : strings) {
+                int len = ((String) e.getValue()).length();
+                if (len > longestLen) {
+                    longest = e;
+                    longestLen = len;
+                }
+            }
+            if (longest == null) {
+                break;
+            }
+            int reduce = total - usable;
+            String v = (String) longest.getValue();
+            int newLen = Math.max(v.length() - reduce, Math.max(v.length() / 2, 200));
+            String capped = v.length() <= newLen ? v
+                    : TextRetentionUtil.retainHeadTail(v, newLen);
+            total -= v.length() - capped.length();
+            longest.setValue(capped);
+        }
     }
 
     /** 合并 event.actions().stateDelta() 到 snapshot.state——只同步最新运行态 */

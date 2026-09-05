@@ -333,7 +333,13 @@ public class FixedSpringAI extends BaseLlm {
     /**
      * 历史 assistant 事件 → spring-ai 消息列表（0 或 1 条）：
      * 解析事件文本中的隐藏草稿标记，构造 {@link DeepSeekAssistantMessage}（草稿放
-     * reasoningContent、正文放 content）；无草稿时返回空列表（跳过该条历史）。
+     * reasoningContent、正文放 content）。
+     *
+     * <p>降级策略（V3 实测校准）：DeepSeek 并非每次调用都产出 reasoning_content——
+     * 无草稿标记的文本事件跳过（L1 兜底，防"原响应有草稿却未回传"的 400）；
+     * 但<b>携带 FunctionCall 的 assistant 事件必须保留</b>（tool 消息要与前置
+     * tool_calls 配对，整条跳过会导致 "Messages with role 'tool' must be a response
+     * to a preceding message with 'tool_calls'" 400），无标记时构造不带草稿的消息即可。
      */
     private List<Message> toHistoryAssistantMessages(Content content) {
         StringBuilder text = new StringBuilder();
@@ -358,15 +364,17 @@ public class FixedSpringAI extends BaseLlm {
         String[] parsed = ReasoningTagUtil.parse(raw);
         String reasoning = parsed[0];
         String visible = parsed[1] == null ? "" : parsed[1];
-        if (reasoning == null) {
-            // 无草稿：整条跳过（DeepSeek thinking+工具场景的历史 assistant 必须带草稿回传）
+
+        DeepSeekAssistantMessage.Builder builder = DeepSeekAssistantMessage.builder();
+        if (reasoning != null) {
+            builder.reasoningContent(reasoning);
+        } else if (toolCalls.isEmpty()) {
+            // 无草稿且无工具调用：整条跳过（DeepSeek thinking+工具场景无法确认原文是否带草稿）
             return List.of();
         }
-        DeepSeekAssistantMessage.Builder builder = DeepSeekAssistantMessage.builder()
-                .reasoningContent(reasoning);
-        if (!visible.isEmpty()) {
-            builder.content(visible);
-        }
+        // DeepSeekChatModel.createRequest 对 assistant 消息断言 content 文本非 null——
+        // 纯工具调用消息可见文本为空时回退空串（内容由 tool_calls 承载）
+        builder.content(visible);
         if (!toolCalls.isEmpty()) {
             builder.toolCalls(toolCalls);
         }
