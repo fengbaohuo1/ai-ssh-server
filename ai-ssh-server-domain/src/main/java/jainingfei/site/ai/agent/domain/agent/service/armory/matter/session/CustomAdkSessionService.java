@@ -49,7 +49,9 @@ import java.util.concurrent.ConcurrentMap;
  *   <li>tool → truncateEventText(4000)：FunctionResponse 事件会进入托管循环的下一轮 LLM 请求</li>
  *   <li>assistant/model → truncateEventText(2000)：V3 partial 语义下一次 LLM 调用只有一条聚合事件落库，
  *       无需再碎片合并；限长仍跳过隐藏草稿标记区</li>
- *   <li>所有事件 → trimEvents：最多保留 max-turns 轮、max-events 条（压缩引擎启用后降级为兜底，见压缩提交）</li>
+ *   <li>压缩事件（actions.compaction）→ 专属分支：不做净化/截断/合并，追加后剪枝被覆盖的普通事件
+ *       与旧压缩事件；压缩开启（compact.enabled）时丢头 trim 停用，长度治理交给压缩引擎</li>
+ *   <li>所有事件 → trimEvents（压缩关闭时）：最多保留 max-turns 轮、max-events 条</li>
  *   <li>stateDelta → mergeStateDelta：只同步最新运行态，不保存整段历史</li>
  * </ul>
  *
@@ -80,6 +82,11 @@ public class CustomAdkSessionService implements BaseSessionService {
     /** 最多保留的用户轮次数（可配置，默认 4）；轮次是比"消息条数"更自然的对话单位 */
     @Value("${ai.session-governance.max-turns:4}")
     private int maxTurns;
+
+    /** W4 压缩开关（ai.session-governance.compact.enabled）：开启后长度治理交给 ADK
+     * 事件压缩引擎（滚动摘要 + 覆盖区间剪枝），丢头 trim 停用（压缩事件不可被裁掉） */
+    @Value("${ai.session-governance.compact.enabled:false}")
+    private boolean compactEnabled;
 
     /** appName → userId → sessionId → SessionSnapshot */
     private final ConcurrentMap<String, ConcurrentMap<String, ConcurrentMap<String, SessionSnapshot>>> sessions =
@@ -165,6 +172,19 @@ public class CustomAdkSessionService implements BaseSessionService {
         }
 
         Event normalized = normalizeEvent(event);
+
+        // 压缩摘要事件（W4）：框架 Contents 依赖 compaction 标记过滤被覆盖区间——
+        // 走专属分支：不做角色净化/截断/合并；滚动摘要折叠后立即剪枝被覆盖的普通事件
+        // 与旧压缩事件（内存有界），压缩事件本身永不被 trim 裁掉
+        if (isCompactionEvent(normalized)) {
+            appendCompactionEvent(snapshot, normalized);
+            snapshot.setLastUpdateTime(resolveUpdateTime(normalized));
+            if (session.events() != snapshot.getRawEvents()) {
+                session.events().add(normalized);
+            }
+            return Single.just(normalized);
+        }
+
         String role = resolveRole(normalized);
         if ("user".equalsIgnoreCase(role)) {
             normalized = sanitizeUserEvent(normalized);
@@ -178,7 +198,11 @@ public class CustomAdkSessionService implements BaseSessionService {
 
         snapshot.getRawEvents().add(normalized);
         mergeStateDelta(snapshot, normalized);
-        trimEvents(snapshot.getRawEvents());
+        if (!compactEnabled) {
+            // W4 压缩开启后长度治理由压缩引擎承担（滚动摘要 + 剪枝）；丢头 trim 会与
+            // "折叠回填"互斥（把摘要前的原文或摘要本身裁掉），仅作未开启时的旧语义
+            trimEvents(snapshot.getRawEvents());
+        }
         snapshot.setLastUpdateTime(resolveUpdateTime(normalized));
         // 同步到 Runner 传入的 session 对象（ADK 1.9 起 Contents 等每步从该对象读事件；
         // 官方 InMemorySessionService 同样通过 BaseSessionService.super.appendEvent 直接 add，
@@ -441,6 +465,38 @@ public class CustomAdkSessionService implements BaseSessionService {
                 snapshot.getState().put(entry.getKey(), entry.getValue());
             }
         }
+    }
+
+    /** 是否为压缩摘要事件（EventActions.compaction 标记，W4） */
+    private static boolean isCompactionEvent(Event event) {
+        return event.actions() != null && event.actions().compaction().isPresent();
+    }
+
+    /**
+     * 追加压缩摘要事件并剪枝被覆盖区间（W4）：
+     * 普通事件时间戳落在 [start,end] 内 → 移除（内容已折叠进摘要）；
+     * 旧压缩事件完全被新摘要覆盖（start/end 均在内）→ 移除（滚动折叠链，内容已并入新摘要）。
+     * 剪枝后 Contents 处理器按剩余压缩标记重建请求内容，语义与框架滚动摘要一致。
+     */
+    private void appendCompactionEvent(SessionSnapshot snapshot, Event compactionEvent) {
+        List<Event> events = snapshot.getRawEvents();
+        var compaction = compactionEvent.actions().compaction().orElse(null);
+        if (compaction == null) {
+            return;
+        }
+        long start = compaction.startTimestamp();
+        long end = compaction.endTimestamp();
+        int before = events.size();
+        events.removeIf(event -> {
+            if (isCompactionEvent(event)) {
+                var ec = event.actions().compaction().orElse(null);
+                return ec != null && ec.startTimestamp() >= start && ec.endTimestamp() <= end;
+            }
+            return event.timestamp() >= start && event.timestamp() <= end;
+        });
+        events.add(compactionEvent);
+        log.debug("压缩摘要事件已追加，剪枝 {} 条覆盖事件 [{}..{}]，剩余 {} 条",
+                before - events.size() + 1, start, end, events.size());
     }
 
     /** 裁剪事件列表：先按轮次裁剪，再按总条数兜底 */

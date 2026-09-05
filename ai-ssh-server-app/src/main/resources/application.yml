@@ -6,10 +6,11 @@ spring:
 
 # 会话治理参数（教程 2-5/2-6 吸收 + W2 参数化；V3 托管循环回归后修订）
 # V3 起 ADK Runner 只持久化"聚合事件"（一次 LLM 调用一条），不再有流式碎片；
-# MAX_TURNS/MAX_EVENTS 丢头语义将在压缩引擎落地后降级为兜底（见 compact.* 注释）。
+# W4 压缩（compact.*）开启后长度治理交给 ADK 事件压缩引擎（滚动摘要 + 覆盖剪枝），
+# MAX_TURNS/MAX_EVENTS 丢头 trim 停用为兜底。
 ai:
   session-governance:
-    max-events: 20            # ADK Session 最多保留的事件条数（压缩引擎启用后仅作兜底）
+    max-events: 20            # ADK Session 最多保留的事件条数（压缩引擎启用后停用）
     max-turns: 4              # 最多保留的用户轮次（同上）
     max-user-text: 4000       # user 事件净化后保留上限（字符）
     max-tool-text: 4000       # tool 事件单条保留上限（head/tail；托管循环下 FunctionResponse
@@ -19,3 +20,11 @@ ai:
     loop:
       max-llm-calls: 30         # 单次 runAsync 内 LLM 调用上限（ADK 托管循环熔断，
                                 # 超限抛 LlmCallsLimitExceededException 结束回合）
+    compact:
+      enabled: true             # 事件压缩（W4）：滚动摘要折叠最旧区间，近端原文保留
+      token-threshold: 48000    # 触发阈值（token）。优先读聚合事件 usageMetadata 的真实
+                                # promptTokenCount；无 usage 时框架回退 chars/4 估算（中文欠估，
+                                # 按真实 usage 日志校准——正常回复一轮 prompt 约 1-3K token，
+                                # 阈值取"接近模型窗口上限但留缓存余量"的经验值）
+      event-retention-size: 24  # 近端保留原始事件条数（此后的更旧区间折叠成 [历史摘要]）
+      summary-max-chars: 2500   # 摘要事件文本预算（DeterministicEventSummarizer 输出上限）
