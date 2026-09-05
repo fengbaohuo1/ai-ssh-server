@@ -12,6 +12,7 @@ import jainingfei.site.ai.agent.domain.agent.service.armory.matter.mcp.client.fa
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.skills.ToolSkillsCreateService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.StreamingChatModel;
@@ -74,10 +75,21 @@ public class ChatModelNode extends AbstractArmorySupport {
         }
 
         // 3. ChatModel
-        OpenAiChatOptions chatOptions = OpenAiChatOptions.builder()
+        OpenAiChatOptions.Builder optionsBuilder = OpenAiChatOptions.builder()
                 .baseUrl(chatModelConfig.getBaseUrl()).apiKey(chatModelConfig.getApiKey())
-                .model(chatModelConfig.getModel()).build();
-        dynamicContext.setChatModel(new ChatModelFix(OpenAiChatModel.builder().options(chatOptions).build()));
+                .model(chatModelConfig.getModel())
+                // 开启流式 usage 统计：OpenAI 协议要求 stream_options.include_usage=true，
+                // 末块才返回完整 usage（含 prompt_tokens_details.cached_tokens 缓存命中）
+                .streamUsage(true);
+
+        // 推理强度（仅推理模型生效，非推理模型忽略）
+        String reasoningEffort = chatModelConfig.getReasoningEffort();
+        if (StringUtils.isNotBlank(reasoningEffort)) {
+            optionsBuilder.reasoningEffort(reasoningEffort);
+        }
+
+        dynamicContext.setChatModel(new ChatModelFix(
+                OpenAiChatModel.builder().options(optionsBuilder.build()).build()));
 
         log.info("ChatModelNode 装配完成, mcpToolsets:{}", dynamicContext.getMcpToolsets().size());
         return router(requestParameter, dynamicContext);
@@ -99,12 +111,22 @@ public class ChatModelNode extends AbstractArmorySupport {
         private Prompt fix(Prompt p) {
             ChatOptions o = p.getOptions();
             if (o == null || o instanceof OpenAiChatOptions) return p;
-            // ADK 产出 ToolCallingChatOptions → 转为 OpenAiChatOptions 保留工具声明
-            OpenAiChatOptions opts = OpenAiChatOptions.builder()
+            // ADK 产出 ToolCallingChatOptions → 转为 OpenAiChatOptions，以 defaultOptions 为基底合并：
+            // 除 baseUrl/apiKey/model/工具声明外，reasoningEffort/streamUsage 等新选项也必须透传，
+            // 否则工具轮次中会静默丢失（装配节点配置的选项只存在于 defaultOptions）
+            ToolCallingChatOptions t = (ToolCallingChatOptions) o;
+            OpenAiChatOptions.Builder merged = OpenAiChatOptions.builder()
                     .baseUrl(defaultOptions.getBaseUrl()).apiKey(defaultOptions.getApiKey())
                     .model(defaultOptions.getModel())
-                    .toolCallbacks(((ToolCallingChatOptions) o).getToolCallbacks()).build();
-            return new Prompt(p.getInstructions(), opts);
+                    .toolCallbacks(t.getToolCallbacks());
+            if (StringUtils.isNotBlank(defaultOptions.getReasoningEffort())) {
+                merged.reasoningEffort(defaultOptions.getReasoningEffort());
+            }
+            if (defaultOptions.getStreamOptions() != null
+                    && Boolean.TRUE.equals(defaultOptions.getStreamOptions().includeUsage())) {
+                merged.streamUsage(true);
+            }
+            return new Prompt(p.getInstructions(), merged.build());
         }
     }
 }

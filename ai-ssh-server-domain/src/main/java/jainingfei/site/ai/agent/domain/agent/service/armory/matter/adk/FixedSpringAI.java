@@ -24,6 +24,10 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.completions.CompletionUsage;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.metadata.Usage;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -49,6 +53,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *   纯文本对话中保留（真实段落分隔）。
  * </pre>
  */
+@Slf4j
 public class FixedSpringAI extends BaseLlm {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -77,27 +82,83 @@ public class FixedSpringAI extends BaseLlm {
             if (stream && streamingChatModel != null) {
                 boolean hasTools = req.tools() != null && !req.tools().isEmpty();
 
+                // 流式 usage 只在末块返回（需装配层 streamUsage=true），且末块通常无文本——
+                // 会被下方空白过滤/缓冲逻辑丢弃，因此在过滤之前观察每个 chunk，
+                // 记录最后一次出现的 usage，待流结束后统一输出（含缓存命中 token 数）
+                AtomicReference<Usage> usageRef = new AtomicReference<>();
+                Flowable<ChatResponse> observed = Flowable.fromPublisher(
+                        streamingChatModel.stream(prompt).doOnNext(cr -> observeUsage(cr, usageRef)));
+
                 if (hasTools) {
                     // 工具模式：空白 chunk 缓冲合并。
                     // 真实换行（Markdown 表格/段落的分隔）是独立空白 chunk——缓冲后随下一文本 chunk
                     // 一起发出，完整保留；工具调用 chunk 到达时丢弃缓冲（phantom 空白过滤）。
                     AtomicReference<String> pendingWs = new AtomicReference<>("");
-                    return Flowable.fromPublisher(streamingChatModel.stream(prompt))
+                    return observed
                             .flatMap(cr -> mergeWhitespace(cr, pendingWs))
-                            .map(this::toLlmResponse);
+                            .map(this::toLlmResponse)
+                            .doOnComplete(() -> logUsage(usageRef.get()));
                 }
 
                 // 无工具模式：只过滤 null/空，保留段落分隔
-                return Flowable.fromPublisher(
-                        streamingChatModel.stream(prompt)
-                                .filter(FixedSpringAI::isNotEmpty)
-                                .map(this::toLlmResponse));
+                return observed
+                        .filter(FixedSpringAI::isNotEmpty)
+                        .map(this::toLlmResponse)
+                        .doOnComplete(() -> logUsage(usageRef.get()));
             }
             ChatResponse resp = chatModel.call(prompt);
+            logUsage(resp.getMetadata() != null ? resp.getMetadata().getUsage() : null);
             return Flowable.just(toLlmResponse(resp));
         } catch (Exception e) {
             return Flowable.error(e);
         }
+    }
+
+    // ===== Usage 观测（教程 2-9：缓存命中可验证） =====
+
+    /** 流式路径：在空白过滤前观察 chunk，保留最后一次出现的 usage（末块含完整统计） */
+    private static void observeUsage(ChatResponse cr, AtomicReference<Usage> usageRef) {
+        if (cr == null || cr.getMetadata() == null) return;
+        Usage usage = cr.getMetadata().getUsage();
+        if (usage != null) {
+            usageRef.set(usage);
+        }
+    }
+
+    /** 输出一次模型调用的 token 消耗（含缓存命中数），用于验证 Prompt Cache 收益 */
+    private static void logUsage(Usage usage) {
+        if (usage == null) return;
+        log.info("LLM usage | promptTokens: {} | completionTokens: {} | totalTokens: {} | cachedTokens: {}",
+                usage.getPromptTokens(), usage.getCompletionTokens(), usage.getTotalTokens(),
+                extractCachedTokens(usage));
+    }
+
+    /**
+     * 提取缓存命中的 token 数：优先 spring-ai 的 CacheRead 字段（2.0.0 起提供），
+     * 未填充时回退到 OpenAI SDK 原生 usage 的 prompt_tokens_details.cached_tokens。
+     */
+    private static Long extractCachedTokens(Usage usage) {
+        try {
+            Long cached = usage.getCacheReadInputTokens();
+            if (cached != null) {
+                return cached;
+            }
+            Object nativeUsage = usage.getNativeUsage();
+            if (nativeUsage instanceof CompletionUsage completionUsage) {
+                return completionUsage.promptTokensDetails()
+                        .flatMap(CompletionUsage.PromptTokensDetails::cachedTokens)
+                        .orElse(null);
+            }
+            if (nativeUsage instanceof ChatCompletion chatCompletion) {
+                return chatCompletion.usage()
+                        .flatMap(u -> u.promptTokensDetails())
+                        .flatMap(CompletionUsage.PromptTokensDetails::cachedTokens)
+                        .orElse(null);
+            }
+        } catch (Exception e) {
+            log.debug("提取缓存命中 token 失败: {}", e.getMessage());
+        }
+        return null;
     }
 
     @Override
