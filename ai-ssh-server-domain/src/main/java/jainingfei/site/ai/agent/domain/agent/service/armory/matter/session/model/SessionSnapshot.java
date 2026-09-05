@@ -34,7 +34,7 @@ public class SessionSnapshot {
     /** 最新运行态（由 event.actions().stateDelta() 合并而来） */
     private State state;
 
-    /** 已净化的原始事件列表（截断/剥离前缀/限轮次后） */
+    /** 已净化的原始事件列表（截断/剥离动态后缀/限轮次后） */
     @Builder.Default
     private List<Event> rawEvents = new CopyOnWriteArrayList<>();
 

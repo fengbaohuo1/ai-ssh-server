@@ -3,3 +3,15 @@ spring:
     name: ai-ssh-server-app
   profiles:
     active: dev
+
+# 会话治理参数（教程 2-5/2-6 吸收 + W2 参数化）
+# 默认值 = 原代码硬编码常量，行为不漂移；各 profile 可按模型窗口/成本诉求覆盖。
+# 注意：MAX_TURNS/MAX_EVENTS 超限是"从头丢事件"，与 2-9 前缀缓存互斥——W4 将改为预算触发压缩。
+ai:
+  session-governance:
+    max-events: 20            # ADK Session 最多保留的事件条数
+    max-turns: 4              # 最多保留的用户轮次
+    max-user-text: 4000       # user 事件净化后保留上限（字符）
+    max-tool-text: 1000       # tool 事件单条保留上限（head/tail）
+    max-assistant-text: 2000  # assistant/model 事件单条保留上限（head/tail）
+    context-token-budget: 8000  # 业务侧历史裁剪预算（HybridReducer；AiCallNode 传 0 回退到此默认）

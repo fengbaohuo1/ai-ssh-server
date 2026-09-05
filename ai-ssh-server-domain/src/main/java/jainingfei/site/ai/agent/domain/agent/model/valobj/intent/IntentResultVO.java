@@ -24,7 +24,7 @@ import java.util.Map;
  *                         └─ reclassified        → 反馈回路标记，避免二次重分类
  *
  *   AiCallNode 拿到结果后：
- *      └─ DynamicContext.currentIntent          → 注入 Prompt 前缀 [用户意图]
+ *      └─ DynamicContext.currentIntent          → 注入用户消息动态段 [用户意图]
  *      └─ DynamicContext.currentIntentResult    → 反馈回路读取
  * </pre>
  *

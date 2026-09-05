@@ -19,7 +19,7 @@ import java.util.Map;
  *
  * <p>组合三个内部组件：
  * <ul>
- *   <li>{@link DynamicPromptBuilder} —— 组装结构化消息前缀</li>
+ *   <li>{@link DynamicPromptBuilder} —— 组装结构化消息后缀（2-9 起缓存友好，拼在用户消息之后）</li>
  *   <li>{@link MilestoneTracker} —— 检测并缓存关键事件</li>
  *   <li>{@link IChatContextService} —— 聚合各 ContextProvider（环境 / 任务 / 里程碑 / 工具摘要）</li>
  * </ul>
@@ -45,28 +45,22 @@ public class PromptService implements IPromptService {
     }
 
     @Override
-    public String buildEnrichedMessage(String userMessage, String sessionId, String userId,
-                                       String terminalSessionId, List<String> recentCommands,
-                                       List<Map<String, Object>> messageHistory, String intentLabel) {
+    public String buildMessageSuffix(String sessionId, String userId, String terminalSessionId,
+                                     List<String> recentCommands, List<Map<String, Object>> messageHistory,
+                                     String intentLabel) {
         // 1. 聚合各 ContextProvider（环境 / 任务 / 里程碑 / 工具摘要）→ PromptContextVO
         PromptContextVO promptContextVO = chatContextService.buildPromptContext(
                 sessionId, userId, terminalSessionId, messageHistory);
         promptContextVO.setRecentCommands(recentCommands);
-        // 2. 意图标签流转：intentLabel → PromptContextVO.intentLabel → DynamicPromptBuilder 前缀
+        // 2. 意图标签流转：intentLabel → PromptContextVO.intentLabel → DynamicPromptBuilder 消息后缀
         promptContextVO.setIntentLabel(intentLabel);
 
-        // 3. 生成消息前缀
-        String prefix = dynamicPromptBuilder.buildMessagePrefix(promptContextVO);
-
-        if (prefix.isEmpty()) {
-            return userMessage;
-        }
-
-        return prefix + "\n---\n" + userMessage;
+        // 3. 生成动态消息后缀（空串 = 无内容；由调用方拼在原始用户消息之后、\n---\n 分隔）
+        return dynamicPromptBuilder.buildMessageSuffix(promptContextVO);
     }
 
     @Override
-    public String buildIncrementalPrefix(String sessionId, long sinceMilestoneTs,
+    public String buildIncrementalSuffix(String sessionId, long sinceMilestoneTs,
                                          List<String> recentCommands, int sinceCommandCount,
                                          int sinceToolResultCount) {
         StringBuilder sb = new StringBuilder();

@@ -91,7 +91,7 @@ public class RunnerNode extends AbstractArmorySupport {
         }
 
         // 使用自定义 Session/Memory 服务接管框架层会话治理（2-6 节）：
-        // Session —— 净化器 + 限流器 + 修剪器（剥离动态前缀、截断长文本、限轮次限条数）
+        // Session —— 净化器 + 限流器 + 修剪器（剥离动态后缀、截断长文本、限轮次限条数）
         // Memory —— 空实现（收掉 ADK 记忆职责，避免与业务侧记忆重复）
         return new Runner(
                 baseAgent,

@@ -7,12 +7,13 @@ import org.springframework.stereotype.Component;
 
 /**
  * 动态 Prompt 构建器——将 {@link PromptContextVO} 中的环境信息、最近命令、里程碑事件、
- * 当前任务、工具执行摘要翻译为模型可读的结构化消息前缀。
+ * 当前任务、工具执行摘要翻译为模型可读的结构化消息后缀。
  *
  * <p>两类构建方式：
  * <ul>
- *   <li>{@link #buildMessagePrefix} —— 拼在用户消息前面（当前使用，因为 ADK Runner 的
- *       system instruction 在 Agent 装配阶段已固定，运行期改不了）</li>
+ *   <li>{@link #buildMessageSuffix} —— 拼在用户消息之后（当前使用，缓存友好：动态内容
+ *       放末尾，保证 system + 历史消息 + 用户原始消息 这个前缀序列逐字节稳定，
+ *       使 LLM Prompt Cache 能命中前面的稳定部分）</li>
  *   <li>{@link #build} —— 追加到 system instruction 末尾（预留）</li>
  * </ul>
  *
@@ -23,7 +24,13 @@ import org.springframework.stereotype.Component;
 public class DynamicPromptBuilder {
 
     /**
-     * 将动态上下文构建为用户消息前缀。
+     * 将动态上下文构建为用户消息后缀（缓存友好，对齐教程 2-9）。
+     *
+     * <p>适用背景：ADK Runner 的 system instruction 在 Agent 装配阶段固定、运行期改不了，
+     * 动态上下文只能随用户消息发送。教程 2-9 前把它拼在用户消息<b>前面</b>，但动态内容
+     * 每轮都在变，会破坏整个请求的字节前缀，导致 LLM 服务端 Prompt Cache（按前缀匹配）
+     * 无法命中；现改为拼在<b>后面</b>——稳定前缀（system + 历史 + 原始用户消息）逐字节不变，
+     * 缓存命中后只有末尾的短后缀 miss。
      *
      * <p>输出格式（有内容才输出对应段落）：
      * <pre>
@@ -40,9 +47,9 @@ public class DynamicPromptBuilder {
      * </pre>
      *
      * @param ctx 动态上下文，为 null 时返回空串
-     * @return 富化消息前缀，无内容时返回空串
+     * @return 动态消息后缀，无内容时返回空串
      */
-    public String buildMessagePrefix(PromptContextVO ctx) {
+    public String buildMessageSuffix(PromptContextVO ctx) {
         if (ctx == null) return "";
 
         StringBuilder sb = new StringBuilder();
@@ -110,9 +117,9 @@ public class DynamicPromptBuilder {
 
         if (!hasContent) return "";
 
-        String prefix = sb.toString();
-        log.debug("构建消息前缀，长度: {}", prefix.length());
-        return prefix;
+        String suffix = sb.toString();
+        log.debug("构建消息后缀，长度: {}", suffix.length());
+        return suffix;
     }
 
     /**

@@ -9,7 +9,7 @@ import lombok.NoArgsConstructor;
  * 里程碑事件——记录对话中的关键节点（用户纠偏、任务切换、工具报错等）。
  *
  * <p>由 {@code MilestoneTracker} 基于正则自动识别，供 {@code DynamicPromptBuilder}
- * 注入到每轮用户消息前缀中，让 LLM 知道"发生过什么"。
+ * 注入到每轮用户消息的动态段中，让 LLM 知道"发生过什么"。
  */
 @Data
 @Builder

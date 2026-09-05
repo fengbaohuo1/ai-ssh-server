@@ -58,7 +58,7 @@ import java.util.Map;
  * <pre>
  *   用户 "查下 redis 是不是挂了"
  *     classify → 规则命中"挂了" conf=0.6 → 下沉 LLM → DIAGNOSE conf=0.8
- *     注入 Prompt 前缀 [用户意图] DIAGNOSE
+ *     注入用户消息动态段 [用户意图] DIAGNOSE
  *     工具执行 ssh "redis-cli ping" → 返回 PONG（成功）
  *     reportFeedback(success=true) → 维持 DIAGNOSE
  *

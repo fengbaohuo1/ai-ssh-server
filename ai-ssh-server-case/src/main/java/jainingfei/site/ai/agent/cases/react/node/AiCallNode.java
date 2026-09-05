@@ -45,9 +45,9 @@ import java.util.regex.Pattern;
  *   <li>准备：{@link #prepareRunner} 取 Runner + {@link #bindTerminalSession} 绑定终端会话</li>
  *   <li>识别：{@link #classifyIntent} 意图识别（仅第 1 轮）</li>
  *   <li>裁剪：{@link #trimMessageHistory} 业务侧历史（供 ContextProvider 消费）</li>
- *   <li>富化：{@link #buildEnrichedMessage} 分发到两个策略——
- *       第 1 轮 {@link #buildFirstRoundMessage} 全量注入，后续轮 {@link #buildSubsequentRoundMessage} 增量注入</li>
- *   <li>组装：{@link #buildUserContent} 拼接上一轮工具执行结果</li>
+ *   <li>组装：{@link #buildFirstRoundContent}（第 1 轮全量动态段）/ {@link #buildSubsequentRoundContent}
+ *       （后续轮增量动态段 + 上一轮工具结果回灌）——统一"稳定段在前、动态段在后、\n---\n 分隔"的
+ *       缓存友好布局（2-9）：system + 历史 + 稳定段前缀逐字节稳定，命中 LLM Prompt Cache</li>
  *   <li>调用：{@link #invokeRunner} 单轮生成，事件流处理（{@link #handleRunnerEvent}）</li>
  *   <li>统计：{@link #updateStats} 更新步数与工具调用数</li>
  *   <li>路由：有工具调用 → ToolCallNode；无 → LoopDecisionNode</li>
@@ -108,20 +108,20 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         ctx.getCurrentToolCalls().clear();
         trimMessageHistory(ctx);
 
-        // 4. 富化用户消息（每轮都做；第 1 轮与后续轮策略不同，见 buildFirstRoundMessage / buildSubsequentRoundMessage）
-        String enrichedMessage = buildEnrichedMessage(lastUserMessage, ctx);
+        // 4. 组装本轮 userContent（每轮都做；第 1 轮与后续轮策略不同，见
+        //    buildFirstRoundContent / buildSubsequentRoundContent）——
+        //    统一布局：稳定段（原始消息 [+ 上一轮工具结果]）在前，动态段在后，"\n---\n" 分隔
+        Content userContent = buildRoundUserContent(lastUserMessage, ctx);
 
-        // 5. 拼接上一轮工具执行结果 → 组装 userContent
-        Content userContent = buildUserContent(enrichedMessage, lastUserMessage, ctx);
-
-        // 6. 调用 ADK Runner（单轮模式：只生成，不执行工具）
+        // 5. 调用 ADK Runner（单轮模式：只生成，不执行工具）
         log.info("调用 ADK Runner，用户消息: {}", truncateForLog(lastUserMessage, 200));
+        log.debug("本轮 LLM 输入长度: {} (原始: {})", textLength(userContent), lastUserMessage.length());
         RoundResult round = invokeRunner(registerVO.getRunner(), userContent, ctx);
 
-        // 7. 更新步数和统计
+        // 6. 更新步数和统计
         updateStats(ctx, round);
 
-        // 8. 路由
+        // 7. 路由
         return router(requestParameter, ctx);
     }
 
@@ -195,36 +195,42 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
     }
 
     /**
-     * 裁剪业务侧消息历史（优先级 + 滑动窗口混合策略，8000 token 预算）——
+     * 裁剪业务侧消息历史（优先级 + 滑动窗口混合策略，token 预算由配置
+     * ai.session-governance.context-token-budget 决定，默认 8000）——
      * 供 ContextProvider（Task/ToolResult 等）消费；框架层历史由 CustomAdkSessionService 治理。
      */
     private void trimMessageHistory(DefaultReActFactory.DynamicContext ctx) {
-        List<Map<String, Object>> trimmedHistory = chatContextService.trimHistory(ctx.getMessageHistory(), 8000);
+        // 传 0 回退到配置默认预算（W2：预算参数化，不再在此硬编码 8000）
+        List<Map<String, Object>> trimmedHistory = chatContextService.trimHistory(ctx.getMessageHistory(), 0);
         ctx.setMessageHistory(new ArrayList<>(trimmedHistory));
     }
 
     /**
-     * 富化用户消息——每轮都做，但第 1 轮与后续轮的策略完全不同，分发到两个方法：
-     * <ul>
-     *   <li>第 1 轮 {@link #buildFirstRoundMessage}：全量注入（环境信息 + 最近命令 + 历史里程碑 + 当前任务 + 工具摘要 + 用户意图）</li>
-     *   <li>后续轮 {@link #buildSubsequentRoundMessage}：只注入增量（新命令 + 新里程碑 + 意图修正提示），旧前缀已在 ADK 会话历史中</li>
-     * </ul>
+     * 组装本轮 userContent——按轮次分发到两个构建器。
+     *
+     * <p>统一布局（缓存友好，教程 2-9）：稳定段在前、动态段在后：
+     * <pre>
+     *   第 1 轮:  原始消息 + "\n---\n" + 全量动态后缀
+     *   后续轮:  原始消息 + [上一轮工具执行结果] + "\n---\n" + 增量动态段
+     * </pre>
+     * 动态段只影响请求末尾，system + 历史 + 稳定段前缀逐字节稳定，可命中 LLM Prompt Cache；
+     * 会话净化器按同一分隔线规则剥离动态段后，落库内容与改造前逐字节一致。
      */
-    private String buildEnrichedMessage(String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
-        if (ctx.getStep() == 0) {
-            return buildFirstRoundMessage(lastUserMessage, ctx);
-        }
-        return buildSubsequentRoundMessage(lastUserMessage, ctx);
+    private Content buildRoundUserContent(String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
+        String text = ctx.getStep() == 0
+                ? buildFirstRoundContent(lastUserMessage, ctx)
+                : buildSubsequentRoundContent(lastUserMessage, ctx);
+        return Content.fromParts(Part.fromText(text));
     }
 
-    /** 第 1 轮：全量注入动态上下文前缀 */
-    private String buildFirstRoundMessage(String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
-        String enrichedMessage = promptService.buildEnrichedMessage(
-                lastUserMessage, ctx.getSessionId(), ctx.getUserId(),
+    /** 第 1 轮：全量动态后缀（环境信息 + 最近命令 + 历史里程碑 + 当前任务 + 工具摘要 + 用户意图） */
+    private String buildFirstRoundContent(String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
+        String suffix = promptService.buildMessageSuffix(
+                ctx.getSessionId(), ctx.getUserId(),
                 ctx.getTerminalSessionId(), ctx.getRecentCommands(), ctx.getMessageHistory(),
                 ctx.getCurrentIntent());
         // 更新注入水位——必须先于记录本消息里程碑：
-        // 本消息的纠偏/切换应影响"下一轮"决策，而不是出现在它自己消息的前缀里
+        // 本消息的纠偏/切换应影响"下一轮"决策，而不是出现在它自己消息的动态段里
         ctx.markEnrichmentInjected(chatContextService.getToolResultCount(ctx.getSessionId()));
         // 记录用户消息里程碑（仅第 1 轮：原始消息只在循环入口出现一次，
         // 逐轮重复记录会把同一事件刷满 50 条上限，挤掉真实的工具报错事件）
@@ -233,12 +239,18 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         longTermMemoryService.saveUserMessage(
                 ctx.getUserId(), ctx.getSessionId(), lastUserMessage,
                 ctx.getCurrentIntent(), true);
-        return enrichedMessage;
+        return suffix.isEmpty() ? lastUserMessage : lastUserMessage + "\n---\n" + suffix;
     }
 
-    /** 第 2 轮起：只注入新增命令 + 新增里程碑 + 工具执行时间线（增量水位过滤）+ 意图修正提示 */
-    private String buildSubsequentRoundMessage(String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
-        String delta = promptService.buildIncrementalPrefix(
+    /**
+     * 第 2 轮起：稳定段 = 原始消息 + 上一轮工具执行结果（回灌，消费即清空）；
+     * 动态段 = 新增命令 + 新增里程碑 + 工具执行时间线（增量水位过滤）+ 意图修正提示。
+     *
+     * <p>工具结果块必须位于分隔线<b>之前</b>（稳定段内）：净化器按分隔线剥离动态段后，
+     * 落库会话仍保留工具结果（与改造前逐字节一致），跨轮历史回放不丢执行结果。
+     */
+    private String buildSubsequentRoundContent(String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
+        String delta = promptService.buildIncrementalSuffix(
                 ctx.getSessionId(), ctx.getInjectedMilestoneTs(),
                 ctx.getRecentCommands(), ctx.getInjectedCommandCount(),
                 ctx.getInjectedToolResultCount());
@@ -251,21 +263,26 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         }
 
         ctx.markEnrichmentInjected(chatContextService.getToolResultCount(ctx.getSessionId()));
-        return delta.isEmpty() ? lastUserMessage : delta + "\n---\n" + lastUserMessage;
-    }
 
-    /** 拼接上一轮工具执行结果（如有）→ 组装 userContent；已消费的结果即刻清空 */
-    private Content buildUserContent(String enrichedMessage, String lastUserMessage, DefaultReActFactory.DynamicContext ctx) {
-        StringBuilder fullContent = new StringBuilder(enrichedMessage);
+        // 稳定段：原始消息 + 上一轮工具执行结果（如有）；已消费的结果即刻清空
+        String stable = lastUserMessage;
         String lastResult = ctx.getLastToolResultText();
         if (lastResult != null && !lastResult.isEmpty()) {
-            fullContent.append("\n\n[上一轮工具执行结果]\n").append(lastResult);
+            stable = stable + "\n\n[上一轮工具执行结果]\n" + lastResult;
         }
-        // 已消费本轮工具结果——清空，本轮新执行的结果由 ToolCallNode 重新累积
         ctx.setLastToolResultText("");
-        log.debug("本轮 LLM 输入长度: {} (原始: {}, 富化: {})",
-                fullContent.length(), lastUserMessage.length(), enrichedMessage.length());
-        return Content.fromParts(Part.fromText(fullContent.toString()));
+
+        return delta.isEmpty() ? stable : stable + "\n---\n" + delta;
+    }
+
+    /** 提取 userContent 纯文本长度（供日志） */
+    private static int textLength(Content content) {
+        return content.parts()
+                .map(ps -> ps.stream()
+                        .filter(p -> p.text().isPresent())
+                        .map(p -> p.text().get())
+                        .reduce("", String::concat))
+                .orElse("").length();
     }
 
     /**

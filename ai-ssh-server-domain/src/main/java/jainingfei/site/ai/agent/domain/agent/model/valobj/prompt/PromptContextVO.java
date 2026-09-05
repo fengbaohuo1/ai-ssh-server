@@ -10,7 +10,7 @@ import java.util.List;
  * 当前任务、工具执行摘要五类动态上下文。
  *
  * <p>由 {@code ChatContextService.buildPromptContext()} 聚合各 ContextProvider
- * 的输出组装，供 {@code DynamicPromptBuilder} 翻译为结构化消息前缀。
+ * 的输出组装，供 {@code DynamicPromptBuilder} 翻译为结构化消息后缀（拼在用户消息之后，缓存友好）。
  */
 @Data
 @Builder
@@ -41,9 +41,9 @@ public class PromptContextVO {
     private String taskDescription;
 
     /**
-     * 当前意图标签（由意图识别系统经 PromptService.buildEnrichedMessage(intentLabel) 注入）。
+     * 当前意图标签（由意图识别系统经 PromptService.buildMessageSuffix(intentLabel) 注入）。
      * <p>
-     * 由 {@code DynamicPromptBuilder} 渲染为消息前缀 "[用户意图] xxx"，让主模型感知意图但不强制路由。
+     * 由 {@code DynamicPromptBuilder} 渲染为消息后缀中的 "[用户意图] xxx" 段，让主模型感知意图但不强制路由。
      */
     private String intentLabel;
 

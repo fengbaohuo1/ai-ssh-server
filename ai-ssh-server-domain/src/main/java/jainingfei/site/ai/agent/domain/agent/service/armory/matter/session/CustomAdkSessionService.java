@@ -15,7 +15,9 @@ import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Single;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.model.SessionSnapshot;
+import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -34,18 +36,18 @@ import java.util.concurrent.ConcurrentMap;
  * <p>为什么自己接管 Session：业务层（2-4 节起）已经做了动态 Prompt 上下文增强，
  * 富化消息适合发给模型做推理，但并不适合被 ADK 原样存回 Session：
  * <pre>
- *   1. 用户原始问题被动态前缀污染（[系统环境]...\n---\n原始消息 原样落库）
+ *   1. 用户原始问题被动态后缀污染（原始消息 + "\n---\n" + [系统环境]... 原样落库）
  *   2. 相同上下文在业务层和框架层重复保存
  *   3. tool / assistant 长文本让 Session 持续膨胀
  *   4. 对话轮次越来越长，后续取历史成本越来越高
  * </pre>
  *
- * <p>治理手段（appendEvent 时按角色执行）：
+ * <p>治理手段（appendEvent 时按角色执行；上限经 ai.session-governance.* 可配置）：
  * <ul>
- *   <li>user → sanitizeUserEvent：剥离动态前缀，只留原始用户问题（+工具结果），并截断到 MAX_USER_TEXT</li>
+ *   <li>user → sanitizeUserEvent：剥离动态后缀（2-9 起动态段在分隔线之后），只留原始用户问题（+工具结果），并截断到上限</li>
  *   <li>tool → truncateEventText(1000)</li>
  *   <li>assistant/model → truncateEventText(2000)</li>
- *   <li>所有事件 → trimEvents：最多保留 MAX_TURNS 轮、MAX_EVENTS 条</li>
+ *   <li>所有事件 → trimEvents：最多保留 max-turns 轮、max-events 条</li>
  *   <li>stateDelta → mergeStateDelta：只同步最新运行态，不保存整段历史</li>
  * </ul>
  *
@@ -56,20 +58,25 @@ import java.util.concurrent.ConcurrentMap;
 @Component
 public class CustomAdkSessionService implements BaseSessionService {
 
-    /** Session 最多保留的 event 条数，防止框架层历史无限膨胀 */
-    private static final int MAX_EVENTS = 20;
+    /** Session 最多保留的 event 条数，防止框架层历史无限膨胀（可配置，默认 20） */
+    @Value("${ai.session-governance.max-events:20}")
+    private int maxEvents;
 
-    /** assistant/model 文本的最大保留长度 */
-    private static final int MAX_ASSISTANT_TEXT = 2000;
+    /** assistant/model 文本的最大保留长度（可配置，默认 2000） */
+    @Value("${ai.session-governance.max-assistant-text:2000}")
+    private int maxAssistantText;
 
-    /** tool 结果文本的最大保留长度 */
-    private static final int MAX_TOOL_TEXT = 1000;
+    /** tool 结果文本的最大保留长度（可配置，默认 1000） */
+    @Value("${ai.session-governance.max-tool-text:1000}")
+    private int maxToolText;
 
-    /** user 事件的最大保留长度（剥离前缀后；富化消息可能内嵌工具结果） */
-    private static final int MAX_USER_TEXT = 4000;
+    /** user 事件的最大保留长度（剥离动态段后；富化消息可能内嵌工具结果；可配置，默认 4000） */
+    @Value("${ai.session-governance.max-user-text:4000}")
+    private int maxUserText;
 
-    /** 最多保留的用户轮次数；轮次是比"消息条数"更自然的对话单位 */
-    private static final int MAX_TURNS = 4;
+    /** 最多保留的用户轮次数（可配置，默认 4）；轮次是比"消息条数"更自然的对话单位 */
+    @Value("${ai.session-governance.max-turns:4}")
+    private int maxTurns;
 
     /** appName → userId → sessionId → SessionSnapshot */
     private final ConcurrentMap<String, ConcurrentMap<String, ConcurrentMap<String, SessionSnapshot>>> sessions =
@@ -159,9 +166,9 @@ public class CustomAdkSessionService implements BaseSessionService {
         if ("user".equalsIgnoreCase(role)) {
             normalized = sanitizeUserEvent(normalized);
         } else if ("tool".equalsIgnoreCase(role)) {
-            normalized = truncateEventText(normalized, MAX_TOOL_TEXT);
+            normalized = truncateEventText(normalized, maxToolText);
         } else if ("assistant".equalsIgnoreCase(role) || "model".equalsIgnoreCase(role)) {
-            normalized = truncateEventText(normalized, MAX_ASSISTANT_TEXT);
+            normalized = truncateEventText(normalized, maxAssistantText);
         }
 
         snapshot.getRawEvents().add(normalized);
@@ -225,10 +232,31 @@ public class CustomAdkSessionService implements BaseSessionService {
     }
 
     /**
-     * 对 user 事件做净化：剥离动态 Prompt 前缀，只保留原始用户问题（及内嵌工具结果）。
+     * 对 user 事件做净化：剥离动态消息后缀，只保留原始用户问题（及内嵌工具结果）。
      *
-     * <p>环境信息、最近命令、关键事件等内容业务层已维护一份，
+     * <p>这一步是"避免上下文重复"的关键动作之一。
+     * 因为环境信息、最近命令、关键事件等内容，业务层已经维护了一份，
      * 不应再在框架层 Session 里无限重复保存。
+     *
+     * <p>案例（2-9 缓存友好布局：动态段在分隔线之后）：
+     * <pre>
+     *   输入：
+     *   请继续查看 error.log
+     *   [上一轮工具执行结果]
+     *   $ tail -n 50 error.log
+     *   ...
+     *   ---
+     *   [系统环境]
+     *   系统: Linux
+     *   [关键事件]
+     *   - permission denied
+     *
+     *   输出：
+     *   请继续查看 error.log
+     *   [上一轮工具执行结果]
+     *   $ tail -n 50 error.log
+     *   ...
+     * </pre>
      */
     private Event sanitizeUserEvent(Event event) {
         String text = event.stringifyContent();
@@ -236,9 +264,9 @@ public class CustomAdkSessionService implements BaseSessionService {
             return event;
         }
 
-        String actualUserMessage = stripDynamicPrefix(text);
-        if (actualUserMessage.length() > MAX_USER_TEXT) {
-            actualUserMessage = actualUserMessage.substring(0, MAX_USER_TEXT) + "...";
+        String actualUserMessage = stripDynamicSuffix(text);
+        if (actualUserMessage.length() > maxUserText) {
+            actualUserMessage = actualUserMessage.substring(0, maxUserText) + "...";
         }
         if (actualUserMessage.equals(text)) {
             return event;
@@ -255,35 +283,66 @@ public class CustomAdkSessionService implements BaseSessionService {
     }
 
     /**
-     * 从文本中剥离动态注入前缀。
+     * 从文本中剥离动态注入后缀。
      *
-     * <p>优先按 {@code \n---\n} 分隔线切分（富化消息的标准格式）；
-     * 若没有分隔线，再根据典型前缀段落标签做启发式判断。
+     * <p>按最后一个 {@code \n---\n} 分隔线切分并保留分隔线之前的部分——
+     * 动态段自身不含分隔线，而用户原文可能含分隔线，取最后一个最稳妥；
+     * 若没有分隔线，再根据典型后缀段落标签做启发式判断。
+     *
+     * <p>案例 1（第 1 轮富化消息）：
+     * <pre>
+     *   帮我分析日志
+     *   ---
+     *   [系统环境]
+     *   ...
+     *
+     *   结果：帮我分析日志
+     * </pre>
+     *
+     * <p>案例 2（后续轮：工具结果块在分隔线之前，属稳定段，随净化一并保留）：
+     * <pre>
+     *   再试一次 ls /var/log
+     *   [上一轮工具执行结果]
+     *   $ ls /var/log
+     *   ...
+     *   ---
+     *   [关键事件]
+     *   - 工具执行失败
+     *
+     *   结果：再试一次 ls /var/log
+     *   [上一轮工具执行结果]
+     *   $ ls /var/log
+     *   ...
+     * </pre>
+     *
+     * @param text 原始文本
+     * @return 剥离后缀后的文本
      */
-    private String stripDynamicPrefix(String text) {
-        if (text.contains("\n---\n")) {
-            String[] parts = text.split("\\n---\\n", 2);
-            return parts.length == 2 ? parts[1].trim() : text;
+    private String stripDynamicSuffix(String text) {
+        int sepIndex = text.lastIndexOf("\n---\n");
+        if (sepIndex >= 0) {
+            String head = text.substring(0, sepIndex).trim();
+            return head.isEmpty() ? text : head;
         }
 
-        boolean looksLikeInjectedPrefix = text.startsWith("[系统环境]")
-                || text.startsWith("[最近执行的命令]")
-                || text.startsWith("[关键事件]")
-                || text.startsWith("[当前任务]")
-                || text.startsWith("[工具执行摘要]");
-        if (!looksLikeInjectedPrefix) {
+        boolean looksLikeInjectedSuffix = text.endsWith("[系统环境]")
+                || text.endsWith("[最近执行的命令]")
+                || text.endsWith("[关键事件]")
+                || text.endsWith("[当前任务]")
+                || text.endsWith("[工具执行摘要]");
+        if (!looksLikeInjectedSuffix) {
             return text;
         }
 
         int splitIndex = text.lastIndexOf('\n');
-        if (splitIndex < 0 || splitIndex >= text.length() - 1) {
+        if (splitIndex < 0) {
             return text;
         }
-        String tail = text.substring(splitIndex + 1).trim();
-        return tail.isEmpty() ? text : tail;
+        String head = text.substring(0, splitIndex).trim();
+        return head.isEmpty() ? text : head;
     }
 
-    /** 截断过长的事件文本——框架层 Session 保留"够用信息"，不无上限保存完整原文 */
+    /** 截断过长的事件文本——head/tail 保留 + 省略计数，框架层 Session 保留"够用信息"，不无上限保存完整原文 */
     private Event truncateEventText(Event event, int maxLength) {
         String text = event.stringifyContent();
         if (text == null || text.length() <= maxLength) {
@@ -295,7 +354,7 @@ public class CustomAdkSessionService implements BaseSessionService {
         String role = content == null ? "assistant" : content.role().orElse("assistant");
         truncated.setContent(Content.builder()
                 .role(role)
-                .parts(List.of(Part.fromText(text.substring(0, maxLength) + "...")))
+                .parts(List.of(Part.fromText(TextRetentionUtil.retainHeadTail(text, maxLength))))
                 .build());
         return truncated;
     }
@@ -318,14 +377,14 @@ public class CustomAdkSessionService implements BaseSessionService {
     /** 裁剪事件列表：先按轮次裁剪，再按总条数兜底 */
     private void trimEvents(List<Event> events) {
         trimByTurn(events);
-        while (events.size() > MAX_EVENTS) {
+        while (events.size() > maxEvents) {
             events.remove(0);
         }
     }
 
     /**
      * 按用户轮次裁剪事件——从后往前回收最近消息，每遇到一条 user 消息计一轮，
-     * 累计 MAX_TURNS 轮后停止。保留下的是"完整的最近几轮"，而不是按条数硬裁的碎片。
+     * 累计 maxTurns 轮后停止。保留下的是"完整的最近几轮"，而不是按条数硬裁的碎片。
      */
     private void trimByTurn(List<Event> events) {
         if (events.isEmpty()) {
@@ -338,7 +397,7 @@ public class CustomAdkSessionService implements BaseSessionService {
             trimmed.addFirst(current);
             if ("user".equalsIgnoreCase(resolveRole(current))) {
                 userTurnCount++;
-                if (userTurnCount >= MAX_TURNS) {
+                if (userTurnCount >= maxTurns) {
                     break;
                 }
             }

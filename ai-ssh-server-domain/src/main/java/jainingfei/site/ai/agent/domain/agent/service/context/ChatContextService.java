@@ -6,6 +6,7 @@ import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.context.provider.ContextProvider;
 import jainingfei.site.ai.agent.domain.agent.service.context.provider.impl.ToolResultProvider;
 import jainingfei.site.ai.agent.domain.agent.service.context.reducer.impl.HybridReducer;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
@@ -21,7 +22,7 @@ import java.util.Map;
  * <pre>
  *   AiCallNode.doApply()
  *        |
- *        | (1) trimHistory(history, 8000)
+ *        | (1) trimHistory(history, 预算=0回退默认8000，可配置)
  *        |        |
  *        |        v
  *        |     HybridReducer = PriorityReducer ∪ SlidingWindowReducer + 保底最近2组
@@ -29,7 +30,7 @@ import java.util.Map;
  *        |        v
  *        |     裁剪后的历史回写 DynamicContext
  *        |
- *        | (2) PromptService.buildEnrichedMessage(...)
+ *        | (2) PromptService.buildMessageSuffix(...)
  *        |        |
  *        |        v
  *        |     buildPromptContext(sessionId, userId, terminalSessionId, history)
@@ -42,7 +43,7 @@ import java.util.Map;
  *        |        |     finalCtx.putAll(...)   合并所有键值对
  *        |        |
  *        |        v
- *        |     PromptContextVO --&gt; DynamicPromptBuilder --&gt; 消息前缀
+ *        |     PromptContextVO --&gt; DynamicPromptBuilder --&gt; 消息后缀（拼在用户消息之后，缓存友好）
  *        |
  *        | (3) 工具执行后 pushToolResult(sessionId, toolName, result)
  *        |        |
@@ -57,9 +58,11 @@ import java.util.Map;
 @Service
 public class ChatContextService implements IChatContextService {
 
-    private static final int DEFAULT_MAX_CONTEXT_TOKENS = 8000;
-
     private final List<ContextProvider> providers;
+
+    /** 业务侧历史裁剪预算（HybridReducer），默认 8000；可经 ai.session-governance.context-token-budget 覆盖 */
+    @Value("${ai.session-governance.context-token-budget:8000}")
+    private int contextTokenBudget;
 
     @Resource
     private HybridReducer hybridReducer;
@@ -105,7 +108,7 @@ public class ChatContextService implements IChatContextService {
         if (history == null || history.isEmpty()) {
             return List.of();
         }
-        return hybridReducer.reduce(history, tokenBudget > 0 ? tokenBudget : DEFAULT_MAX_CONTEXT_TOKENS);
+        return hybridReducer.reduce(history, tokenBudget > 0 ? tokenBudget : contextTokenBudget);
     }
 
     @Override

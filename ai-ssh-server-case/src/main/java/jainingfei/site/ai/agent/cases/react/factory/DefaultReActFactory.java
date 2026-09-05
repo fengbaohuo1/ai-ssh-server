@@ -131,15 +131,15 @@ public class DefaultReActFactory {
         @Builder.Default
         private String lastToolResultText = "";
 
-        /** 已注入前缀的最近命令条数——增量注入水位（第 1 轮全量注入后记录，后续轮只注入新命令） */
+        /** 已注入动态段的最近命令条数——增量注入水位（第 1 轮全量注入后记录，后续轮只注入新命令） */
         @Builder.Default
         private int injectedCommandCount = 0;
 
-        /** 已注入前缀的里程碑时间戳水位——增量注入水位（时间戳晚于该值的里程碑视为新增） */
+        /** 已注入动态段的里程碑时间戳水位——增量注入水位（时间戳晚于该值的里程碑视为新增） */
         @Builder.Default
         private long injectedMilestoneTs = 0L;
 
-        /** 已注入前缀的工具结果条数水位——增量注入水位（2-8 修复①：时间线只注入该下标之后的新条目） */
+        /** 已注入动态段的工具结果条数水位——增量注入水位（2-8 修复①：时间线只注入该下标之后的新条目） */
         @Builder.Default
         private int injectedToolResultCount = 0;
 
@@ -150,7 +150,7 @@ public class DefaultReActFactory {
         //  意图识别（2-7 节新增）
         // ══════════════════════════════════════════════════════════
 
-        /** 当前意图名称（如 "DIAGNOSE"）——经 PromptContextVO.intentLabel 注入 [用户意图] 前缀 */
+        /** 当前意图名称（如 "DIAGNOSE"）——经 PromptContextVO.intentLabel 注入用户消息动态段 [用户意图] */
         private String currentIntent;
 
         /** 当前意图识别结果——反馈回路（reportFeedback 重分类）读取/更新 */
@@ -208,9 +208,10 @@ public class DefaultReActFactory {
         }
 
         /**
-         * 标记本轮富化已注入——更新增量注入水位。
+         * 标记本轮动态段已注入——更新增量注入水位。
          *
-         * <p>调用时机：每次 buildEnrichedMessage / buildIncrementalPrefix 之后。
+         * <p>调用时机：第 1 轮调用 buildMessageSuffix 之后、后续轮调用
+         * buildIncrementalSuffix 之后（均在 AiCallNode 的轮次内容构建器内）。
          * 命令水位取当前累计条数；里程碑水位取当前时间（先标记后记录的里程碑，
          * 时间戳必然晚于水位，会在下一轮以增量形式注入）；工具结果水位取
          * ToolResultProvider 当前缓存条数。

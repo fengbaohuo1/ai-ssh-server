@@ -19,7 +19,7 @@ import java.util.Map;
  * <ol>
  *   <li>意图识别的任务锚点（2-8 对齐教程）——IntentService 维护的 TaskStateVO 随
  *       反馈回路/纠偏实时更新，是最新鲜、最准确的任务描述</li>
- *   <li>兜底：消息历史中首条 user 消息（前缀清洗后）——任务锚点尚未建立时使用</li>
+ *   <li>兜底：消息历史中首条 user 消息（动态后缀清洗后）——任务锚点尚未建立时使用</li>
  * </ol>
  */
 @Slf4j
@@ -74,18 +74,18 @@ public class TaskProvider implements ContextProvider {
                 .ifPresent(m -> {
                     Object content = m.get("content");
                     if (content != null) {
-                        result.put("taskDescription", stripDynamicPrefix(String.valueOf(content)));
+                        result.put("taskDescription", stripDynamicSuffix(String.valueOf(content)));
                     }
                 });
         return result;
     }
 
-    /** 清洗动态前缀：富化消息形如"前缀\n---\n原始消息"，只保留分隔线之后的部分 */
-    private String stripDynamicPrefix(String text) {
+    /** 清洗动态后缀：富化消息形如"原始消息\n---\n动态后缀"，只保留分隔线之前的部分（取最后一个分隔线，防用户原文自带） */
+    private String stripDynamicSuffix(String text) {
         if (text == null) return null;
-        if (text.contains("\n---\n")) {
-            String[] parts = text.split("\\n---\\n", 2);
-            return parts.length == 2 ? parts[1].trim() : text;
+        int sepIndex = text.lastIndexOf("\n---\n");
+        if (sepIndex >= 0) {
+            return text.substring(0, sepIndex).trim();
         }
         return text;
     }
