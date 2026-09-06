@@ -49,17 +49,12 @@ public class ChatService implements IChatService {
     private IChatHistoryRepository chatHistoryRepository;
 
     @Override
-    public List<AiAgentConfigTableVO.Agent> queryAiAgentConfigList() {
+    public List<AiAgentConfigTableVO> queryAiAgentConfigList() {
         Map<String, AiAgentConfigTableVO> tables = aiAgentAutoConfigProperties.getTables();
-        List<AiAgentConfigTableVO.Agent> agents = new ArrayList<>();
-        if (ObjectUtils.isNotEmpty(tables)) {
-            for (AiAgentConfigTableVO vo : tables.values()) {
-                if (vo.getAgent() != null) {
-                    agents.add(vo.getAgent());
-                }
-            }
+        if (ObjectUtils.isEmpty(tables)) {
+            return new ArrayList<>();
         }
-        return agents;
+        return new ArrayList<>(tables.values());
     }
 
     @Override

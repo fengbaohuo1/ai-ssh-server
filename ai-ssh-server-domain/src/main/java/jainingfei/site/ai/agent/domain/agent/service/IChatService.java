@@ -10,7 +10,10 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import java.util.List;
 
 public interface IChatService {
-    List<AiAgentConfigTableVO.Agent> queryAiAgentConfigList();
+    /**
+     * 查询智能体配置（配置文件解析结果全表，含模型/能力信息）
+     */
+    List<AiAgentConfigTableVO> queryAiAgentConfigList();
 
     String createSession(String agentId, String userId);
 

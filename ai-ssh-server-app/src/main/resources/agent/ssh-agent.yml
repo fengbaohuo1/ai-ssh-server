@@ -14,6 +14,8 @@ ai:
               base-url: https://api.deepseek.com
               api-key: sk-REDACTED
               model: deepseek-v4-flash
+              # 模型上下文窗口（tokens），供前端配置信息展示；与会话治理压缩阈值（compact.token-threshold）相互独立
+              context-size: 128000
               # 推理强度：minimal、low、medium、high（仅推理模型生效；非推理模型无需配置，避免未知参数风险）
               # reasoning-effort: medium
               # tool-skills-list:

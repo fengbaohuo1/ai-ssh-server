@@ -68,6 +68,13 @@ public class AiAgentConfigTableVO {
             private String model;
 
             /**
+             * 模型上下文窗口大小（tokens），来自配置文件 chat-model.context-size。
+             * <p>仅作前端展示与信息回传使用，与会话治理的压缩触发阈值（compact.token-threshold）
+             * 相互独立——治理阈值代表"接近模型窗口上限但留缓存余量"的经验值。
+             */
+            private Long contextSize;
+
+            /**
              * 推理强度：minimal、low、medium、high（仅推理模型生效，非推理模型忽略；对齐教程 2-9）
              */
             private String reasoningEffort;

@@ -12,6 +12,7 @@ import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
 import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -42,14 +43,11 @@ public class AgentServiceController implements IAgentService {
     public Response<List<AiAgentConfigResponseDTO>> queryAiAgentConfigList() {
         try {
             log.info("查询智能体配置列表");
-            List<AiAgentConfigTableVO.Agent> agentConfigs = chatService.queryAiAgentConfigList();
-            List<AiAgentConfigResponseDTO> responseDTOS = agentConfigs.stream().map(agentConfig -> {
-                AiAgentConfigResponseDTO dto = new AiAgentConfigResponseDTO();
-                dto.setAgentId(agentConfig.getAgentId());
-                dto.setAgentName(agentConfig.getAgentName());
-                dto.setAgentDesc(agentConfig.getAgentDesc());
-                return dto;
-            }).collect(Collectors.toList());
+            List<AiAgentConfigTableVO> tables = chatService.queryAiAgentConfigList();
+            List<AiAgentConfigResponseDTO> responseDTOS = tables.stream()
+                    .map(AgentServiceController::toConfigResponse)
+                    .filter(java.util.Objects::nonNull)
+                    .collect(Collectors.toList());
             return Response.<List<AiAgentConfigResponseDTO>>builder()
                     .code(ResponseCode.SUCCESS.getCode()).info(ResponseCode.SUCCESS.getInfo()).data(responseDTOS).build();
         } catch (AppException e) {
@@ -58,6 +56,121 @@ public class AgentServiceController implements IAgentService {
             log.error("查询失败", e);
             return Response.<List<AiAgentConfigResponseDTO>>builder().code(ResponseCode.UN_ERROR.getCode()).info(ResponseCode.UN_ERROR.getInfo()).build();
         }
+    }
+
+    /** 配置表 VO → 响应 DTO（剔除 apiKey 等机密；模块/能力缺省为空列表） */
+    private static AiAgentConfigResponseDTO toConfigResponse(AiAgentConfigTableVO vo) {
+        if (vo == null || vo.getAgent() == null) {
+            return null;
+        }
+        AiAgentConfigResponseDTO dto = new AiAgentConfigResponseDTO();
+        AiAgentConfigTableVO.Agent agent = vo.getAgent();
+        dto.setAgentId(agent.getAgentId());
+        dto.setAgentName(agent.getAgentName());
+        dto.setAgentDesc(agent.getAgentDesc());
+        dto.setAppName(vo.getAppName());
+
+        AiAgentConfigTableVO.Module module = vo.getModule();
+        if (module != null) {
+            AiAgentConfigTableVO.Module.ChatModel chatModel = module.getChatModel();
+            if (chatModel != null) {
+                AiAgentConfigResponseDTO.ChatModelInfo modelInfo = new AiAgentConfigResponseDTO.ChatModelInfo();
+                modelInfo.setModelName(chatModel.getModel());
+                modelInfo.setBaseUrl(chatModel.getBaseUrl());
+                modelInfo.setContextSize(chatModel.getContextSize());
+                modelInfo.setReasoningEffort(chatModel.getReasoningEffort());
+                dto.setChatModel(modelInfo);
+            }
+
+            // 子智能体名
+            if (ObjectUtils.isNotEmpty(module.getAgents())) {
+                dto.setSubAgents(module.getAgents().stream()
+                        .map(AiAgentConfigTableVO.Module.Agent::getName)
+                        .collect(Collectors.toList()));
+            } else {
+                dto.setSubAgents(new ArrayList<>());
+            }
+
+            // 工作流
+            if (ObjectUtils.isNotEmpty(module.getAgentWorkflows())) {
+                dto.setAgentWorkflows(module.getAgentWorkflows().stream()
+                        .map(wf -> {
+                            AiAgentConfigResponseDTO.AgentWorkflowInfo info = new AiAgentConfigResponseDTO.AgentWorkflowInfo();
+                            info.setName(wf.getName());
+                            info.setType(wf.getType());
+                            info.setDescription(wf.getDescription());
+                            return info;
+                        })
+                        .collect(Collectors.toList()));
+            } else {
+                dto.setAgentWorkflows(new ArrayList<>());
+            }
+
+            // 运行插件
+            if (module.getRunner() != null && ObjectUtils.isNotEmpty(module.getRunner().getPluginNameList())) {
+                dto.setPlugins(new ArrayList<>(module.getRunner().getPluginNameList()));
+            } else {
+                dto.setPlugins(new ArrayList<>());
+            }
+
+            // MCP 工具 + 技能（挂在 chat-model 下）
+            if (chatModel != null) {
+                dto.setMcpTools(mapMcpTools(chatModel));
+                dto.setSkills(mapSkills(chatModel));
+            } else {
+                dto.setMcpTools(new ArrayList<>());
+                dto.setSkills(new ArrayList<>());
+            }
+        } else {
+            dto.setSubAgents(new ArrayList<>());
+            dto.setAgentWorkflows(new ArrayList<>());
+            dto.setMcpTools(new ArrayList<>());
+            dto.setSkills(new ArrayList<>());
+            dto.setPlugins(new ArrayList<>());
+        }
+        return dto;
+    }
+
+    /** MCP 工具映射：remote/stdio/local 三种连接形态归一为 {name, kind, target} */
+    private static List<AiAgentConfigResponseDTO.McpToolInfo> mapMcpTools(AiAgentConfigTableVO.Module.ChatModel chatModel) {
+        List<AiAgentConfigResponseDTO.McpToolInfo> result = new ArrayList<>();
+        if (ObjectUtils.isEmpty(chatModel.getToolMcpList())) {
+            return result;
+        }
+        for (AiAgentConfigTableVO.Module.ChatModel.ToolMcp mcp : chatModel.getToolMcpList()) {
+            AiAgentConfigResponseDTO.McpToolInfo info = new AiAgentConfigResponseDTO.McpToolInfo();
+            if (mcp.getRemote() != null) {
+                info.setName(mcp.getRemote().getName());
+                info.setKind("remote");
+                info.setTarget(mcp.getRemote().getUrl());
+            } else if (mcp.getStdio() != null) {
+                info.setName(mcp.getStdio().getName());
+                info.setKind("stdio");
+                AiAgentConfigTableVO.Module.ChatModel.ToolMcp.StdioServerParameters.ServerParameters params =
+                        mcp.getStdio().getServerParameters();
+                info.setTarget(params != null ? params.getCommand() : null);
+            } else if (mcp.getLocal() != null) {
+                info.setName(mcp.getLocal().getName());
+                info.setKind("local");
+            }
+            result.add(info);
+        }
+        return result;
+    }
+
+    /** 技能映射：{type, path} 原样透出 */
+    private static List<AiAgentConfigResponseDTO.SkillInfo> mapSkills(AiAgentConfigTableVO.Module.ChatModel chatModel) {
+        List<AiAgentConfigResponseDTO.SkillInfo> result = new ArrayList<>();
+        if (ObjectUtils.isEmpty(chatModel.getToolSkillsList())) {
+            return result;
+        }
+        for (AiAgentConfigTableVO.Module.ChatModel.ToolSkills skill : chatModel.getToolSkillsList()) {
+            AiAgentConfigResponseDTO.SkillInfo info = new AiAgentConfigResponseDTO.SkillInfo();
+            info.setType(skill.getType());
+            info.setPath(skill.getPath());
+            result.add(info);
+        }
+        return result;
     }
 
     @RequestMapping(value = "create_session", method = RequestMethod.POST)
