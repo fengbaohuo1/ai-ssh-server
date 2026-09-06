@@ -13,6 +13,8 @@ import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.TaskStateVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
@@ -37,6 +39,8 @@ import java.util.Map;
  * <ol>
  *   <li>准备：{@link #prepareRunner} 取 Runner</li>
  *   <li>识别：{@link #classifyIntent} 意图识别（回合前，结果入会话缓存）</li>
+ *   <li>同步：{@link #syncTaskStateAfterClassification} 回合入口任务态（CONTINUE 续接/业务意图
+ *       重建或复用/闲聊跳过；CONTINUE 命中时回填根意图标签）</li>
  *   <li>裁剪：{@link #trimMessageHistory} 业务侧历史（供 ContextProvider 消费）</li>
  *   <li>富化：{@link #buildEntryContent} 入口消息（原始消息 + "\n---\n" + 动态后缀，
  *       2-9 缓存友好布局；意图修正提示一次性消费）</li>
@@ -77,7 +81,10 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         String message = requestParameter.getMessage() != null ? requestParameter.getMessage() : "";
 
         // 2. 意图识别（回合前）
-        classifyIntent(ctx, message);
+        IntentResultVO intentResult = classifyIntent(ctx, message);
+
+        // 2.5 任务态同步（回合入口：CONTINUE 续接 / 业务意图重建或复用 / CHAT·UNKNOWN 跳过）
+        syncTaskStateAfterClassification(ctx, message, intentResult);
 
         // 3. 裁剪业务侧消息历史（供 ContextProvider 消费）
         trimMessageHistory(ctx);
@@ -134,8 +141,8 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         return registerVO.getRunner();
     }
 
-    /** 回合级意图识别（结果入会话缓存，供入口富化/工具反馈/下回合使用） */
-    private void classifyIntent(DefaultReActFactory.DynamicContext ctx, String message) {
+    /** 回合级意图识别（结果入会话缓存，供入口富化/工具反馈/下回合使用；异常返回 null 全交主模型） */
+    private IntentResultVO classifyIntent(DefaultReActFactory.DynamicContext ctx, String message) {
         AiAgentRegisterVO registerVO = defaultArmoryFactory.getAiAgentRegisterVO(ctx.getAgentId());
         try {
             if (registerVO.getModelBaseUrl() != null && registerVO.getChatModelName() != null) {
@@ -149,8 +156,44 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                     intentResult.getConfidence(),
                     intentResult.isReclassified());
             chatContextService.setSessionIntent(ctx.getSessionId(), intentResult);
+            return intentResult;
         } catch (Exception e) {
             log.warn("意图识别失败，全交主模型决策: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 回合入口同步任务态（教学版 AiCallNode.syncTaskStateAfterClassification 的 V3.1 映射）。
+     * <p>
+     * 意图识别之后调用一次：CONTINUE 续接 / UNKNOWN·CHAT 跳过 / 业务意图重建或复用
+     * （规则在 IntentService/ContextTracker）。CONTINUE 命中进行中任务时，把会话意图缓存
+     * 回填为任务根意图——对应教学版 currentIntent = rootIntent，使 [用户意图] 标签与后续
+     * 工具反馈面向根意图而非"继续"二字。
+     */
+    private void syncTaskStateAfterClassification(DefaultReActFactory.DynamicContext ctx, String message,
+                                                  IntentResultVO intentResult) {
+        if (intentResult == null) {
+            return;
+        }
+        try {
+            TaskStateVO taskState = intentService.syncTaskStateAfterClassification(
+                    ctx.getSessionId(), message, intentResult);
+            if (intentResult.getIntent() == IntentTypeEnumVO.CONTINUE
+                    && taskState != null && !taskState.isCompleted()
+                    && taskState.getRootIntent() != null) {
+                // 续接：会话意图回填根意图（教学版 currentIntent=rootIntent 的映射）
+                chatContextService.setSessionIntent(ctx.getSessionId(), IntentResultVO.builder()
+                        .intent(taskState.getRootIntent())
+                        .confidence(0.95)
+                        .entities(Map.of("task", String.valueOf(taskState.getCurrentStepIndex())))
+                        .candidateIntents(List.of(taskState.getRootIntent()))
+                        .build());
+                log.info("CONTINUE 续接任务: rootIntent={}, currentStep={}",
+                        taskState.getRootIntent(), taskState.getCurrentStepIndex());
+            }
+        } catch (Exception e) {
+            log.warn("任务态同步失败，跳过（不影响主流程）: {}", e.getMessage());
         }
     }
 

@@ -30,7 +30,9 @@ import java.util.Map;
  *   <li>工具里程碑记录（关键事件）</li>
  *   <li>工具结果缓存（ToolResultProvider 摘要/时间线）</li>
  *   <li>DB 落库 + 环境事实/软件版本/失败信号记忆提取（2-8）</li>
- *   <li>意图反馈回路（结果 → 重分类，修正提示下回合消费）</li>
+ *   <li>意图反馈回路（结果 → 重分类，修正提示下回合消费）+ 任务态打点
+ *       （updateTaskStateAfterFeedback：成功动作留痕/失败置位/重分类换根意图；
+ *       completed 由 LoopDecisionNode 回合收口统一判定，避免托管循环中途误判完成）</li>
  * </ol>
  * 执行点后置不影响语义：托管循环回合内没有"下一轮注入"，反馈与提示只影响后续用户回合。
  */
@@ -103,32 +105,50 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
             // DB 落库 + 记忆提取（call id 取 FR id，与 assistant tool_calls 配对）
             longTermMemoryService.saveToolMessage(userId, sessionId, result.name(), result.id(), resultText, success);
 
-            // 反馈回路：工具结果 → 意图重分类（修正提示下回合一次性注入）
-            handleIntentFeedback(sessionId, resultText);
+            // 反馈回路 + 任务态打点：工具结果 → 意图重分类（修正提示下回合一次性注入）
+            // → 任务步进状态机打点（成功追加留痕/失败置位/重分类换根意图，completed 由 LoopDecisionNode 收口）
+            handleIntentFeedback(sessionId, resultText, result.name(), command);
         } catch (Exception e) {
             log.warn("工具副作用处理失败 sessionId={} tool={}", ctx.getSessionId(), result.name(), e);
         }
     }
 
-    /** 反馈回路（原显式循环 ToolCallNode 语义，改用会话缓存状态） */
-    private void handleIntentFeedback(String sessionId, String toolResult) {
-        IntentResultVO lastIntent = chatContextService.getSessionIntent(sessionId);
-        if (lastIntent == null) {
-            return;
-        }
+    /**
+     * 反馈回路（原显式循环 ToolCallNode 语义，改用会话缓存状态）+ 任务态打点。
+     * <p>
+     * 任务态打点不依赖会话意图是否存在（任务态按 sessionId 维护，意图识别失败也应留痕）。
+     */
+    private void handleIntentFeedback(String sessionId, String toolResult, String toolName, String command) {
         boolean success = toolResult != null && !toolResult.isBlank()
                 && !IntentService.looksLikeIntentMismatch(toolResult);
-        IntentResultVO reclassified = intentService.reportFeedback(sessionId, lastIntent, success, toolResult);
-        if (reclassified != null) {
-            log.info("反馈回路触发重分类: {} -> {} (conf={})",
-                    lastIntent.getIntent(), reclassified.getIntent(), reclassified.getConfidence());
-            chatContextService.setSessionIntent(sessionId, reclassified);
-            chatContextService.setPendingIntentCorrection(sessionId, String.format(
-                    "[用户意图已修正] %s → %s（置信度 %.2f）",
-                    lastIntent.getIntent().getLabel(),
-                    reclassified.getIntent().getLabel(),
-                    reclassified.getConfidence()));
+
+        IntentResultVO lastIntent = chatContextService.getSessionIntent(sessionId);
+        IntentResultVO reclassified = null;
+        if (lastIntent != null) {
+            reclassified = intentService.reportFeedback(sessionId, lastIntent, success, toolResult);
+            if (reclassified != null) {
+                log.info("反馈回路触发重分类: {} -> {} (conf={})",
+                        lastIntent.getIntent(), reclassified.getIntent(), reclassified.getConfidence());
+                chatContextService.setSessionIntent(sessionId, reclassified);
+                chatContextService.setPendingIntentCorrection(sessionId, String.format(
+                        "[用户意图已修正] %s → %s（置信度 %.2f）",
+                        lastIntent.getIntent().getLabel(),
+                        reclassified.getIntent().getLabel(),
+                        reclassified.getConfidence()));
+            }
         }
+
+        // 任务态打点：成功动作摘要入 steps 留痕、失败置位、重分类换根意图（规则在 ContextTracker）
+        String actionSummary = command != null && !command.isBlank() ? command : toolName;
+        intentService.updateTaskStateAfterFeedback(sessionId, success, reclassified, truncate(actionSummary, 80));
+    }
+
+    /** 动作摘要截断（steps 留痕只取头部，防命令过长膨胀上下文展示） */
+    private String truncate(String s, int max) {
+        if (s == null) {
+            return "";
+        }
+        return s.length() > max ? s.substring(0, max) : s;
     }
 
 }
