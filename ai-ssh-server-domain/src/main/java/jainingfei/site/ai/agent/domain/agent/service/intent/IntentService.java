@@ -40,6 +40,7 @@ import java.util.Map;
  *   AiCallNode.doApply
  *      │  configure(baseUrl, apiKey, modelName)   ← 复用 Agent 配置，不单独建模型
  *      │  classify(sessionId, userId, msg)
+ *      │  syncTaskStateAfterClassification(...)   ← 回合入口同步任务态（V3.2）
  *      ▼
  *   IntentService.classify
  *      ├─ 命中缓存(5min)？ → 直接返回
@@ -50,6 +51,8 @@ import java.util.Map;
  *      ▼
  *   AiCallNode: 注入意图标签到 Prompt；工具执行后调用
  *      │  reportFeedback(sessionId, lastIntent, success, toolResult)
+ *      │  updateTaskStateAfterFeedback(...)       ← 每工具结果打点（ToolCallNode）
+ *      │  markTaskCompleted / markTaskInterrupted ← 回合收口（LoopDecisionNode）
  *      ▼
  *   反馈回路：失败 && conf<0.7 && 结果像意图走偏 → 用候选意图重分类（仅一次）
  * </pre>
@@ -297,6 +300,46 @@ public class IntentService implements IIntentService {
     @Override
     public void updateTaskState(String sessionId, TaskStateVO taskState) {
         contextTracker.setTaskState(sessionId, taskState);
+    }
+
+    /**
+     * 分类后同步任务态（透传 {@link ContextTracker#syncTaskStateAfterClassification}）。
+     * <p>
+     * 由 AiCallNode 在 classify 之后、富化/落库之前调用一次；CONTINUE 续接、业务意图
+     * 重建/复用、CHAT·UNKNOWN 跳过的四分支规则见 ContextTracker 实现 javadoc。
+     */
+    @Override
+    public TaskStateVO syncTaskStateAfterClassification(String sessionId, String lastUserMessage,
+                                                        IntentResultVO intentResult) {
+        return contextTracker.syncTaskStateAfterClassification(sessionId, lastUserMessage, intentResult);
+    }
+
+    /**
+     * 反馈后更新任务态（透传 {@link ContextTracker#updateTaskStateAfterFeedback}）。
+     * <p>
+     * 由 ToolCallNode 对每个工具结果打点：成功追加留痕、失败置位、重分类换根意图；
+     * completed 不在本方法推进（回合收口统一判定）。
+     */
+    @Override
+    public TaskStateVO updateTaskStateAfterFeedback(String sessionId, boolean success,
+                                                    IntentResultVO reclassified, String actionSummary) {
+        return contextTracker.updateTaskStateAfterFeedback(sessionId, success, reclassified, actionSummary);
+    }
+
+    /**
+     * 回合正常收口 → 任务完成归档（透传，由 LoopDecisionNode 调用）。
+     */
+    @Override
+    public void markTaskCompleted(String sessionId) {
+        contextTracker.markTaskCompleted(sessionId);
+    }
+
+    /**
+     * 回合异常中断 → 任务保持可续接并打失败标记（透传，由 LoopDecisionNode 调用）。
+     */
+    @Override
+    public void markTaskInterrupted(String sessionId) {
+        contextTracker.markTaskInterrupted(sessionId);
     }
 
     /**
