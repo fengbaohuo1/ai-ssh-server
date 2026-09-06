@@ -94,7 +94,7 @@ public class LoopDecisionNode extends AbstractAIAgentReActSupport {
                 log.info("回合异常中断，任务态保持可续接 rootIntent={}", taskState.getRootIntent());
                 return;
             }
-            if (hasToolResults && !taskState.isLastFeedbackFailed()) {
+            if (hasToolResults && !taskState.isLastFeedbackFailed() && !taskState.isCompleted()) {
                 intentService.markTaskCompleted(sessionId);
                 log.info("回合正常达成，任务态归档完成 rootIntent={} steps={}",
                         taskState.getRootIntent(),

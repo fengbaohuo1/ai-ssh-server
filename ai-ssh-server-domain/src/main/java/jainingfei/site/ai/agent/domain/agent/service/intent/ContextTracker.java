@@ -299,13 +299,14 @@ public class ContextTracker {
      * @param success       当前工具结果是否成功
      * @param reclassified  反馈回路重分类结果（可为 null）
      * @param actionSummary 成功动作的摘要（调用方已截断），追加到 steps 留痕
-     * @return 更新后的任务态；无任务态返回 null
+     * @return 更新后的任务态；无任务态返回 null，已完成归档态原样返回（不再接收打点）
      */
     public TaskStateVO updateTaskStateAfterFeedback(String sessionId, boolean success,
                                                     IntentResultVO reclassified, String actionSummary) {
         TaskStateVO taskState = getTaskState(sessionId);
-        if (taskState == null) {
-            return null;
+        // 无任务态不打点；已完成任务为归档态（惰性等重建），不再接收留痕/标记
+        if (taskState == null || taskState.isCompleted()) {
+            return taskState;
         }
         if (reclassified != null && reclassified.getIntent() != null
                 && reclassified.getIntent() != IntentTypeEnumVO.UNKNOWN

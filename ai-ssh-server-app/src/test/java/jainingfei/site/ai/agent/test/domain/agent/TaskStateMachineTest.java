@@ -242,6 +242,20 @@ public class TaskStateMachineTest {
         assertFalse(tracker.getTaskState(SID).isLastFeedbackFailed());
     }
 
+    @Test
+    public void test_completed_task_is_inert_to_feedback() {
+        // 归档态（已完成）任务惰性等重建：后续工具反馈不再追加留痕/改标记（冒烟回归：
+        // 归档后 "继续" 回合模型再执行工具，不应让 steps 继续膨胀）
+        tracker.syncTaskStateAfterClassification(SID, "查下 502", intent(IntentTypeEnumVO.DIAGNOSE));
+        tracker.updateTaskStateAfterFeedback(SID, true, null, "tail error.log");
+        tracker.markTaskCompleted(SID);
+
+        TaskStateVO state = tracker.updateTaskStateAfterFeedback(SID, true, null, "tail error2.log");
+        assertTrue(state.isCompleted());
+        assertEquals(java.util.List.of("查下 502", "tail error.log"), state.getSteps(), "归档后不得再追加留痕");
+        assertFalse(state.isLastFeedbackFailed(), "归档后的成功反馈不改失败标记");
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  会话隔离
     // ═══════════════════════════════════════════════════════════════
