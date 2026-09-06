@@ -7,6 +7,7 @@ import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
+import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
@@ -42,6 +43,9 @@ public class RootNode extends AbstractAIAgentReActSupport {
     private IChatService chatService;
 
     @Resource
+    private IIntentService intentService;
+
+    @Resource
     private ILongTermMemoryService longTermMemoryService;
 
     @Override
@@ -57,8 +61,12 @@ public class RootNode extends AbstractAIAgentReActSupport {
             message = "";
         }
 
-        // 2. 通过 ChatService 创建/恢复 ADK 会话（2-8：透传客户端 sessionId，重启后旧会话可接续）
+        // 2. 通过 ChatService 创建/恢复 ADK 会话（2-8：透传客户端 sessionId，重启后旧会话可接续；
+        //    ChatService 内部对空快照做 DB 历史回顾注入 P0）
         String sessionId = chatService.createSession(agentId, userId, requestParameter.getSessionId());
+
+        // 2.5 冷启动恢复任务态（P1：chat_task_state → ContextTracker；早于 AiCall 的 classify/TaskProvider）
+        intentService.restoreSessionTaskState(sessionId);
 
         // 3. 绑定终端会话（工具执行靠 SshExecuteAdkTool 静态映射；会话级映射支持跨请求回退）
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {

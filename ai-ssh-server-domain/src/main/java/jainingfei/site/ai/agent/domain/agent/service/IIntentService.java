@@ -94,6 +94,12 @@ public interface IIntentService {
     void markTaskInterrupted(String sessionId);
 
     /**
+     * 冷启动恢复任务态（P1）：内存无任务态且 DB（chat_task_state）有记录时写回内存。
+     * 由 RootNode 在会话重建后调用，早于 classify（CONTINUE 命中）与 TaskProvider。
+     */
+    void restoreSessionTaskState(String sessionId);
+
+    /**
      * 注入智能体的 API 配置，供 LLM 意图分类器复用。
      * <p>
      * 由调用方（如 AiCallNode）在分类前传入 Agent 装配好的 baseUrl/apiKey/模型名，

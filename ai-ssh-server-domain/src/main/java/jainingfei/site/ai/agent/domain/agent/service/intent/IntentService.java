@@ -4,6 +4,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.ConversationCon
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.TaskStateVO;
+import jainingfei.site.ai.agent.domain.agent.adapter.repository.IChatHistoryRepository;
 import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.intent.classifier.impl.LLMIntentClassifier;
 import jainingfei.site.ai.agent.domain.agent.service.intent.classifier.impl.RuleIntentClassifier;
@@ -91,6 +92,10 @@ public class IntentService implements IIntentService {
 
     @Resource
     private ContextTracker contextTracker;
+
+    /** 会话任务态持久化出口（chat_task_state，旁路写入，重启冷启动恢复） */
+    @Resource
+    private IChatHistoryRepository chatHistoryRepository;
 
     // 简单的 LRU 缓存，最大 200 个条目
     private final Map<String, CacheEntry> cache = Collections.synchronizedMap(
@@ -197,6 +202,8 @@ public class IntentService implements IIntentService {
         // 仅在确认为失败时记录，避免一轮多工具结果重复累计
         if (!success) {
             contextTracker.recordFeedback(sessionId, false);
+            // recordFeedback 会原地改任务态失败标记（若有）——同步落库
+            persistTaskState(sessionId);
         }
 
         if (success) {
@@ -300,6 +307,7 @@ public class IntentService implements IIntentService {
     @Override
     public void updateTaskState(String sessionId, TaskStateVO taskState) {
         contextTracker.setTaskState(sessionId, taskState);
+        persistTaskState(sessionId);
     }
 
     /**
@@ -311,7 +319,9 @@ public class IntentService implements IIntentService {
     @Override
     public TaskStateVO syncTaskStateAfterClassification(String sessionId, String lastUserMessage,
                                                         IntentResultVO intentResult) {
-        return contextTracker.syncTaskStateAfterClassification(sessionId, lastUserMessage, intentResult);
+        TaskStateVO state = contextTracker.syncTaskStateAfterClassification(sessionId, lastUserMessage, intentResult);
+        persistTaskState(sessionId);
+        return state;
     }
 
     /**
@@ -323,23 +333,67 @@ public class IntentService implements IIntentService {
     @Override
     public TaskStateVO updateTaskStateAfterFeedback(String sessionId, boolean success,
                                                     IntentResultVO reclassified, String actionSummary) {
-        return contextTracker.updateTaskStateAfterFeedback(sessionId, success, reclassified, actionSummary);
+        TaskStateVO state = contextTracker.updateTaskStateAfterFeedback(
+                sessionId, success, reclassified, actionSummary);
+        persistTaskState(sessionId);
+        return state;
     }
 
     /**
-     * 回合正常收口 → 任务完成归档（透传，由 LoopDecisionNode 调用）。
+     * 回合正常收口 → 任务完成归档（透传，由 LoopDecisionNode 调用；写后旁路落库）。
      */
     @Override
     public void markTaskCompleted(String sessionId) {
         contextTracker.markTaskCompleted(sessionId);
+        persistTaskState(sessionId);
     }
 
     /**
-     * 回合异常中断 → 任务保持可续接并打失败标记（透传，由 LoopDecisionNode 调用）。
+     * 回合异常中断 → 任务保持可续接并打失败标记（透传，由 LoopDecisionNode 调用；写后旁路落库）。
      */
     @Override
     public void markTaskInterrupted(String sessionId) {
         contextTracker.markTaskInterrupted(sessionId);
+        persistTaskState(sessionId);
+    }
+
+    /**
+     * 冷启动恢复任务态（P1）：内存无任务态且 chat_task_state 有记录时写回内存。
+     * 由 RootNode 在会话重建后调用，早于 classify（CONTINUE 判定）与 TaskProvider 锚点读取。
+     */
+    @Override
+    public void restoreSessionTaskState(String sessionId) {
+        if (sessionId == null) {
+            return;
+        }
+        try {
+            if (contextTracker.getTaskState(sessionId) != null) {
+                return;
+            }
+            TaskStateVO taskState = chatHistoryRepository.loadTaskState(sessionId);
+            if (taskState != null) {
+                contextTracker.setTaskState(sessionId, taskState);
+                log.info("冷启动恢复任务态 sessionId={} rootIntent={} completed={}",
+                        sessionId, taskState.getRootIntent(), taskState.isCompleted());
+            }
+        } catch (Exception e) {
+            log.warn("冷启动恢复任务态失败（不影响主流程）sessionId={}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 把内存任务态旁路 upsert 到 chat_task_state（DB 失败仅告警） */
+    private void persistTaskState(String sessionId) {
+        if (sessionId == null) {
+            return;
+        }
+        try {
+            TaskStateVO taskState = contextTracker.getTaskState(sessionId);
+            if (taskState != null) {
+                chatHistoryRepository.upsertTaskState(sessionId, taskState);
+            }
+        } catch (Exception e) {
+            log.warn("任务态落库失败（旁路，不影响主流程）sessionId={}: {}", sessionId, e.getMessage());
+        }
     }
 
     /**

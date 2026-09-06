@@ -6,16 +6,22 @@ import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.agent.adapter.repository.IChatHistoryRepository;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatSessionEntity;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.TaskStateVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.MilestoneVO;
 import jainingfei.site.ai.agent.infrastructure.dao.IChatMessageDao;
 import jainingfei.site.ai.agent.infrastructure.dao.IChatMilestoneDao;
 import jainingfei.site.ai.agent.infrastructure.dao.IChatSessionDao;
+import jainingfei.site.ai.agent.infrastructure.dao.IChatTaskStateDao;
 import jainingfei.site.ai.agent.infrastructure.dao.po.ChatMessagePO;
 import jainingfei.site.ai.agent.infrastructure.dao.po.ChatMilestonePO;
 import jainingfei.site.ai.agent.infrastructure.dao.po.ChatSessionPO;
+import jainingfei.site.ai.agent.infrastructure.dao.po.ChatTaskStatePO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -38,6 +44,9 @@ public class ChatHistoryRepository implements IChatHistoryRepository {
 
     @Resource
     private IChatMilestoneDao chatMilestoneDao;
+
+    @Resource
+    private IChatTaskStateDao chatTaskStateDao;
 
     @Override
     public void saveSession(ChatSessionEntity session) {
@@ -126,6 +135,28 @@ public class ChatHistoryRepository implements IChatHistoryRepository {
         return getRecentMessages(sessionId, limit);
     }
 
+    @Override
+    public void upsertTaskState(String sessionId, TaskStateVO taskState) {
+        if (sessionId == null || taskState == null) {
+            return;
+        }
+        ChatTaskStatePO po = toTaskStatePO(sessionId, taskState);
+        if (chatTaskStateDao.selectById(sessionId) == null) {
+            chatTaskStateDao.insert(po);
+        } else {
+            chatTaskStateDao.updateById(po);
+        }
+    }
+
+    @Override
+    public TaskStateVO loadTaskState(String sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
+        ChatTaskStatePO po = chatTaskStateDao.selectById(sessionId);
+        return po == null ? null : toTaskStateVO(po);
+    }
+
     // ==================== 转换方法 ====================
 
     private ChatMessagePO toPO(ChatMessageEntity entity) {
@@ -174,6 +205,49 @@ public class ChatHistoryRepository implements IChatHistoryRepository {
                 .messageCount(po.getMessageCount())
                 .createdAt(po.getCreatedAt())
                 .updatedAt(po.getUpdatedAt())
+                .build();
+    }
+
+    /** TaskStateVO → PO：steps 用 \u001F 行分隔（避免与命令/文本内容冲突） */
+    private ChatTaskStatePO toTaskStatePO(String sessionId, TaskStateVO vo) {
+        ChatTaskStatePO po = new ChatTaskStatePO();
+        po.setSessionId(sessionId);
+        po.setRootIntent(vo.getRootIntent() != null ? vo.getRootIntent().name() : null);
+        po.setTaskDescription(vo.getTaskDescription());
+        po.setSteps(vo.getSteps() == null || vo.getSteps().isEmpty()
+                ? null : String.join("\u001F", vo.getSteps()));
+        po.setCurrentStepIndex(vo.getCurrentStepIndex());
+        po.setCompleted(vo.isCompleted() ? 1 : 0);
+        po.setLastFeedbackFailed(vo.isLastFeedbackFailed() ? 1 : 0);
+        po.setUpdatedAt(LocalDateTime.now());
+        return po;
+    }
+
+    /** PO → TaskStateVO（脏数据容错：枚举名非法时 rootIntent 为 null） */
+    private TaskStateVO toTaskStateVO(ChatTaskStatePO po) {
+        IntentTypeEnumVO rootIntent = null;
+        if (po.getRootIntent() != null && !po.getRootIntent().isBlank()) {
+            try {
+                rootIntent = IntentTypeEnumVO.valueOf(po.getRootIntent());
+            } catch (IllegalArgumentException e) {
+                // 脏数据容错：枚举演进后旧名失效 → 根意图为空，由下次业务分类重建
+            }
+        }
+        List<String> steps = new ArrayList<>();
+        if (po.getSteps() != null && !po.getSteps().isBlank()) {
+            for (String step : po.getSteps().split("\u001F")) {
+                if (!step.isBlank()) {
+                    steps.add(step);
+                }
+            }
+        }
+        return TaskStateVO.builder()
+                .taskDescription(po.getTaskDescription())
+                .rootIntent(rootIntent)
+                .steps(steps)
+                .currentStepIndex(po.getCurrentStepIndex() != null ? po.getCurrentStepIndex() : 0)
+                .completed(po.getCompleted() != null && po.getCompleted() == 1)
+                .lastFeedbackFailed(po.getLastFeedbackFailed() != null && po.getLastFeedbackFailed() == 1)
                 .build();
     }
 }

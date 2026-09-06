@@ -2,6 +2,7 @@ package jainingfei.site.ai.agent.domain.agent.adapter.repository;
 
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatSessionEntity;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.TaskStateVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.MilestoneVO;
 
 import java.util.List;
@@ -48,4 +49,15 @@ public interface IChatHistoryRepository {
      * 查询会话消息列表（时间正序）
      */
     List<ChatMessageEntity> queryMessageList(String sessionId, int limit);
+
+    /**
+     * 保存（幂等覆盖）会话任务态（P1：chat_task_state，重启冷启动恢复）。
+     * <p>旁路写入语义：调用方 try-catch，DB 失败不影响 Agent 主流程。
+     */
+    void upsertTaskState(String sessionId, TaskStateVO taskState);
+
+    /**
+     * 加载会话任务态；无记录返回 null。
+     */
+    TaskStateVO loadTaskState(String sessionId);
 }
