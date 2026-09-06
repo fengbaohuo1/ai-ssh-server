@@ -40,6 +40,7 @@ SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、�
 - [显式 ReAct 编排——循环控制权回归应用层](D:\study\notes\ai-ssh\显式%20ReAct%20编排——循环控制权回归应用层.md) — 架空 ADK 内部循环：FixedSpringAI 单轮模式（工具调用转 `<tool_calls>` 标签）、每轮富化落地、多命令结果累积回灌、5 个 bug 修复
 - [ReAct 上下文治理与历史净化——教程 2-5 和 2-6 吸收落地](D:\study\notes\ai-ssh\ReAct%20上下文治理与历史净化——教程%202-5%20和%202-6%20吸收落地.md) — 吸收教程 2-5/2-6：ContextProvider 体系（任务锚点 + 工具摘要）、HybridReducer 历史裁剪三件套、CustomAdkSessionService 框架层净化 + 限流、四道闸门分工
 - [意图识别——规则与LLM级联+反馈回路（教程 2-7 吸收落地）](D:\study\notes\ai-ssh\意图识别——规则与LLM级联+反馈回路（教程%202-7%20吸收落地）.md) — 吸收教程 2-7：规则→LLM 级联置信度漏斗、反馈回路重分类、ContextTracker/LRU 缓存、显式循环适配（第 1 轮识别、ToolCallNode 反馈、修正提示一次性注入）、spring-ai 2.x 适配
+- [任务步进状态机——托管循环回合收口落地](D:\study\notes\ai-ssh\任务步进状态机——托管循环回合收口落地.md) — V3.2：TaskStateVO 三入口写路径（AiCallNode 分类后 sync / ToolCallNode 每工具打点 / LoopDecisionNode 回合收口）、completed 判据收敛到回合收口（教学版"首次成功即完成"在托管循环下是 bug）、CONTINUE 会话意图回填、任务态暂存内存缓存
 - [长期记忆与对话持久化——教程 2-8 吸收落地](D:\study\notes\ai-ssh\长期记忆与对话持久化——教程%202-8%20吸收落地.md) — 吸收教程 2-8：4 张表（chat_session/chat_message/chat_milestone/long_term_memory）、消息流经时规则提取 4 类记忆、UNIQUE 键去重 + hit_count、粗筛精排召回、节点挂钩旁路写入、冷启动恢复与会话连续性、顺带修复 3 个 bug（工具摘要注入缺席/回灌累积上限/会话连续性）
 - [上下文策略的代际演进与场景适配——设计讨论复盘](D:\study\notes\ai-ssh\上下文策略的代际演进与场景适配——设计讨论复盘.md) — 2-8 前后设计讨论沉淀：记忆价值=重观察代价、轨迹 vs 里程碑分工、正则长尾实测（Redis 正则与 9 种版本输出）、order=25 隐性契约、每轮裁剪 vs 阈值压缩、SaaS vs 本地 Agent 保守分层；附项目待优化清单
 - [缓存命中与推理强度——教程 2-9 吸收落地](D:\study\notes\ai-ssh\缓存命中与推理强度——教程%202-9%20吸收落地.md) — 吸收教程 2-9：reasoning-effort 配置链路、streamUsage + usage/缓存命中观测（spring-ai 2.0.0 适配）、动态上下文前缀→后缀全套翻转（净化落库字节不变论证）、会话治理参数化、工具输出 head/tail 保留
