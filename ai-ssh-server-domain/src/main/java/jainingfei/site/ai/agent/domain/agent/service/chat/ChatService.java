@@ -39,6 +39,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ChatService implements IChatService {
     private final Map<String, String> userSessions = new ConcurrentHashMap<>();
 
+    /** 冷启动"重建空会话 + 历史回顾注入"的 sessionId 粒度锁（防并发首请求重复回放） */
+    private final Map<String, Object> sessionRestoreLocks = new ConcurrentHashMap<>();
+
     @Resource
     private DefaultArmoryFactory defaultArmoryFactory;
     @Resource
@@ -47,6 +50,8 @@ public class ChatService implements IChatService {
     private ISshConnectionService sshConnectionService;
     @Resource
     private IChatHistoryRepository chatHistoryRepository;
+    @Resource
+    private SessionHistoryReplayer sessionHistoryReplayer;
 
     @Override
     public List<AiAgentConfigTableVO> queryAiAgentConfigList() {
@@ -76,15 +81,25 @@ public class ChatService implements IChatService {
         if (clientSessionId != null && !clientSessionId.isBlank()) {
             // 会话连续性（2-8 修复③）：客户端带回旧 sessionId——
             // 进程内已有则复用；进程内没有（服务重启）则以该 id 重建 ADK 会话，
-            // 配合 RootNode 的 DB 冷启动恢复，旧对话得以接续
+            // 并注入 DB 历史回顾（P0 冷启动一致性），配合 RootNode 的 DB 冷启动恢复
             sessionId = userSessions.computeIfAbsent(userId, uid -> clientSessionId);
             Session existSession = runner.sessionService()
                     .getSession(appName, userId, sessionId, Optional.empty()).blockingGet();
             if (existSession == null) {
-                runner.sessionService()
-                        .createSession(appName, userId, new ConcurrentHashMap<>(), sessionId)
-                        .blockingGet();
-                log.info("以客户端 sessionId 重建 ADK 会话 userId={} sessionId={}", userId, sessionId);
+                // 并发首请求可能同时看到"空快照"：按 sessionId 加锁，重建+回放只执行一次
+                Object lock = sessionRestoreLocks.computeIfAbsent(sessionId, k -> new Object());
+                synchronized (lock) {
+                    Session recheck = runner.sessionService()
+                            .getSession(appName, userId, sessionId, Optional.empty()).blockingGet();
+                    if (recheck == null) {
+                        runner.sessionService()
+                                .createSession(appName, userId, new ConcurrentHashMap<>(), sessionId)
+                                .blockingGet();
+                        log.info("以客户端 sessionId 重建 ADK 会话 userId={} sessionId={}", userId, sessionId);
+                        sessionHistoryReplayer.replayIntoSession(runner, appName, userId, sessionId);
+                    }
+                }
+                sessionRestoreLocks.remove(sessionId);
             }
         } else {
             sessionId = userSessions.computeIfAbsent(userId, uid -> {

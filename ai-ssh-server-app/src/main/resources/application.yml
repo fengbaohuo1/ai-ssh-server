@@ -28,3 +28,8 @@ ai:
                                 # 阈值取"接近模型窗口上限但留缓存余量"的经验值）
       event-retention-size: 24  # 近端保留原始事件条数（此后的更旧区间折叠成 [历史摘要]）
       summary-max-chars: 2500   # 摘要事件文本预算（DeterministicEventSummarizer 输出上限）
+    cold-start:
+      # 冷启动历史回顾预算（P0，字符）：重启后以旧 sessionId 重建空 ADK 会话时，
+      # 只回放"最近一段"对话（user 回顾文本），不回放远古全量——
+      # 避免把运行期已被压缩折叠的中远古区间"复活成全文"、避免首回合 token 暴涨
+      replay-budget-chars: 12000
