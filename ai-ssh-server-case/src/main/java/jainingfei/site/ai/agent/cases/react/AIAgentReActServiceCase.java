@@ -42,10 +42,7 @@ public class AIAgentReActServiceCase implements IAIAgentReActServiceCase {
         AbstractAIAgentReActSupport.startHeartbeat(emitter, requestDTO.getSessionId());
 
         // 3. 发送初始 thinking 事件
-        try {
-            emitter.send(SseEmitter.event().data("{\"v\":\"\",\"s\":{\"t\":\"thinking\"}}"));
-        } catch (Exception ignored) {
-        }
+        SseSteps.sendThinking(emitter);
 
         try {
             log.info("ReAct 流式对话开始 - agentId:{} userId:{} sessionId:{} terminalSessionId:{}",
@@ -65,6 +62,9 @@ public class AIAgentReActServiceCase implements IAIAgentReActServiceCase {
                             result.getTotalToolCalls(), result.getStopReason());
                 } catch (Exception e) {
                     log.error("ReAct 流式对话异常", e);
+                    // 链路级异常在收口节点之外：这里补一条 error 事件，
+                    // 否则前端只能看到"流突然结束"（V3 之前 error 事件既没发也没人渲染）
+                    SseSteps.sendError(emitter, "回合执行失败: " + e.getMessage());
                     try {
                         emitter.completeWithError(e);
                     } catch (Exception ignored) {
@@ -76,6 +76,7 @@ public class AIAgentReActServiceCase implements IAIAgentReActServiceCase {
 
         } catch (Exception e) {
             log.error("ReAct 流式对话初始化失败", e);
+            SseSteps.sendError(emitter, "回合初始化失败: " + e.getMessage());
             emitter.completeWithError(e);
         }
 

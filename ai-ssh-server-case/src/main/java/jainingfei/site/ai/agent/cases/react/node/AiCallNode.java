@@ -262,29 +262,33 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         if (delta != null) {
             ctx.getCurrentUtterance().append(delta);
             ctx.setUtteranceCharsSinceAggregated(ctx.getUtteranceCharsSinceAggregated() + delta.length());
-            sendText(ctx.getEmitter(), delta, ctx.getVisibleText().toString(), null);
+            sendText(ctx.getEmitter(), delta);
         }
 
         // ② 工具调用（聚合事件携带 FunctionCall parts）→ tool_call 步骤 + 计数
+        //    带 id 下发给前端：并发（批量派发/一次多命令）时结果必须按 id 配对，FIFO 会串台
         List<EventTextUtil.ToolCallView> calls = EventTextUtil.functionCalls(event);
         for (EventTextUtil.ToolCallView call : calls) {
             ctx.incrementToolCallCount();
+            ctx.markStepStarted(call.id());
             log.info("模型请求工具: {} args={}", call.name(), call.args());
-            sendToolCallEvent(ctx.getEmitter(), call.name(), call.args());
+            sendToolCallEvent(ctx.getEmitter(), call.id(), call.name(), call.args(), null, null);
         }
 
         // ③ 工具执行结果（FunctionResponse parts）→ tool_result 步骤 + 收集（副作用由 ToolCallNode 统一执行）
         List<EventTextUtil.ToolResultView> results = EventTextUtil.functionResponses(event);
         for (EventTextUtil.ToolResultView result : results) {
             ctx.collectToolResult(result);
-            Map<String, Object> step = new java.util.LinkedHashMap<>();
-            step.put("t", "tool_result");
-            step.put("n", result.name());
-            step.put("r", result.response());
-            sendStep(ctx.getEmitter(), step);
+            Map<String, Object> response = result.response();
+            boolean success = !Boolean.FALSE.equals(response.get("success"));
+            sendToolResultEvent(ctx.getEmitter(), result.id(), result.name(), response,
+                    success, ctx.takeStepElapsedMs(result.id()));
         }
 
-        // ④ 聚合事件（partial 为空）= 一次 LLM 调用结束 → 本次调用文本转入 utterances（收口落库）
+        // ④ 一次 LLM 调用的真实 usage（聚合事件携带）→ 回合累计，收口时以 usage 步骤下发
+        event.usageMetadata().ifPresent(ctx::accumulateUsage);
+
+        // ⑤ 聚合事件（partial 为空）= 一次 LLM 调用结束 → 本次调用文本转入 utterances（收口落库）
         if (!EventTextUtil.isPartial(event)) {
             flushCurrentUtterance(ctx);
         }

@@ -1,9 +1,9 @@
 package jainingfei.site.ai.agent.cases.react;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
+import jainingfei.site.ai.agent.domain.agent.support.StepEvents;
 import jianingfei.site.wrench.design.framework.tree.AbstractMultiThreadStrategyRouter;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.Getter;
@@ -13,7 +13,6 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import jakarta.annotation.Resource;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -47,8 +46,6 @@ public abstract class AbstractAIAgentReActSupport
 
     @Resource
     protected ApplicationContext applicationContext;
-
-    protected static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** 会话 → 终端会话 ID 映射（跨节点共享） */
     protected static final Map<String, String> sessionTerminalMapping = new ConcurrentHashMap<>();
@@ -104,88 +101,52 @@ public abstract class AbstractAIAgentReActSupport
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  SSE 事件发射（兼容现有前端协议 {"v":"...","s":{...}}）
+    //  SSE 事件发射（信封与步骤形状见 SseSteps / StepEvents）
     // ═══════════════════════════════════════════════════════════════
 
-    /**
-     * 发送文本事件，格式：{@code {"v":"text","s":...}} 或 {@code {"v":"text"}}
-     */
-    protected void sendText(SseEmitter emitter, String content, String fullText, Map<String, Object> step) {
-        try {
-            StringBuilder data = new StringBuilder();
-            data.append("{\"v\":").append(MAPPER.writeValueAsString(content));
-            if (step != null && !step.isEmpty()) {
-                data.append(",\"s\":[").append(MAPPER.writeValueAsString(step)).append("]");
-            }
-            data.append("}");
-            emitter.send(SseEmitter.event().data(data.toString()));
-            log.debug("SSE text: contentLen={} hasStep={}", content.length(), step != null);
-        } catch (Exception e) {
-            log.warn("SSE text 发送失败: {}", e.getMessage());
-        }
+    /** 发送文本事件，格式：{@code {"v":"text"}} */
+    protected void sendText(SseEmitter emitter, String content) {
+        SseSteps.sendText(emitter, content);
     }
 
-    /**
-     * 发送纯步骤事件（无文本），格式：{@code {"v":"","s":{...}}}
-     */
+    /** 发送纯步骤事件，格式：{@code {"v":"","s":{...}}} */
     protected void sendStep(SseEmitter emitter, Map<String, Object> step) {
-        try {
-            String data = "{\"v\":\"\",\"s\":" + MAPPER.writeValueAsString(step) + "}";
-            emitter.send(SseEmitter.event().data(data));
-            log.debug("SSE step: {}", step.get("t"));
-        } catch (Exception e) {
-            log.warn("SSE step 发送失败: {}", e.getMessage());
-        }
+        SseSteps.sendStep(emitter, step);
     }
 
     /**
-     * 发送工具调用事件（将 ADK functionCall 转为前端 step 格式）。
+     * 发送工具调用事件（运行中）：带调用 id 与父步骤 id，前端据此把结果配回同一步骤
+     * （旧协议没有 id，前端只能按 FIFO 配对，并发时必然串台）。
      */
-    protected void sendToolCallEvent(SseEmitter emitter, String toolName, Map<String, Object> args) {
-        Map<String, Object> step = new LinkedHashMap<>();
-        step.put("t", "tool_call");
-        step.put("n", toolName);
-        if (args != null) step.put("a", args);
-        sendStep(emitter, step);
+    protected void sendToolCallEvent(SseEmitter emitter, String id, String toolName,
+                                     Map<String, Object> args, String kind, String parentId) {
+        SseSteps.sendStep(emitter, StepEvents.toolCall(id, toolName, args, kind, parentId));
     }
 
-    /**
-     * 发送工具结果事件（将 ADK functionResponse 转为前端 step 格式）。
-     */
-    protected void sendToolResultEvent(SseEmitter emitter, String toolName, Object response) {
-        Map<String, Object> step = new LinkedHashMap<>();
-        step.put("t", "tool_result");
-        step.put("n", toolName);
-        if (response != null) step.put("r", response);
-        sendStep(emitter, step);
+    /** 发送工具结果事件（终态）：id 与调用一致，前端原地升级同一张卡片 */
+    protected void sendToolResultEvent(SseEmitter emitter, String id, String toolName,
+                                       Object response, boolean success, Long elapsedMs) {
+        SseSteps.sendStep(emitter, StepEvents.toolResult(id, toolName, response, success, elapsedMs));
     }
 
     /**
      * 发送 done 事件，SSE 流结束信号。
+     *
+     * @param stopReason completed / error（前端据此区分"正常结束"与"本轮中断"）
      */
-    protected void sendDone(SseEmitter emitter, String finalText) {
-        try {
-            // 只发 done 标记，不带全文（避免前端重复渲染）
-            String json = "{\"v\":\"\",\"s\":{\"t\":\"done\"}}";
-            emitter.send(SseEmitter.event().data(json));
-            log.info("SSE done 已发送");
-        } catch (Exception e) {
-            log.warn("SSE done 发送失败: {}", e.getMessage());
-        }
+    protected void sendDone(SseEmitter emitter, String stopReason) {
+        SseSteps.sendDone(emitter, stopReason);
     }
 
-    /**
-     * 发送 error 事件。
-     */
+    /** 发送 error 事件（前端必须能看到原因，而不是流突然结束） */
     protected void sendError(SseEmitter emitter, String errorMsg) {
-        try {
-            Map<String, Object> step = new LinkedHashMap<>();
-            step.put("t", "error");
-            step.put("m", errorMsg);
-            String data = "{\"v\":\"\",\"s\":" + MAPPER.writeValueAsString(step) + "}";
-            emitter.send(SseEmitter.event().data(data));
-        } catch (Exception ignored) {
-        }
+        SseSteps.sendError(emitter, errorMsg);
+    }
+
+    /** 发送本回合 token / 缓存命中累计 */
+    protected void sendUsage(SseEmitter emitter, long promptTokens, long completionTokens,
+                             long totalTokens, long cachedTokens) {
+        SseSteps.sendUsage(emitter, promptTokens, completionTokens, totalTokens, cachedTokens);
     }
 
     // ═══════════════════════════════════════════════════════════════

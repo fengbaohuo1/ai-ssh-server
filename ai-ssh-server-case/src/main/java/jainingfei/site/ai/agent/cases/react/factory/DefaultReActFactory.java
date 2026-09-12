@@ -1,5 +1,6 @@
 package jainingfei.site.ai.agent.cases.react.factory;
 
+import com.google.genai.types.GenerateContentResponseUsageMetadata;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
 import lombok.AllArgsConstructor;
@@ -12,6 +13,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * ReAct 工厂 + 动态上下文。
@@ -100,6 +102,30 @@ public class DefaultReActFactory {
         private int toolCallCount = 0;
 
         // ══════════════════════════════════════════════════════════
+        //  步骤观测（SSE 步骤协议 v2：耗时与 usage）
+        // ══════════════════════════════════════════════════════════
+
+        /** 步骤开始时间（步骤 id → 毫秒），工具/派发步骤据此算 {@code ms} */
+        @Builder.Default
+        private Map<String, Long> stepStartedAt = new ConcurrentHashMap<>();
+
+        /** 本回合累计输入 token（一次 LLM 调用一条 usageMetadata，回合内求和） */
+        @Builder.Default
+        private long usagePromptTokens = 0;
+
+        /** 本回合累计输出 token */
+        @Builder.Default
+        private long usageCompletionTokens = 0;
+
+        /** 本回合累计总 token */
+        @Builder.Default
+        private long usageTotalTokens = 0;
+
+        /** 本回合累计缓存命中 token（2-9 的缓存收益，首次呈现到界面） */
+        @Builder.Default
+        private long usageCachedTokens = 0;
+
+        // ══════════════════════════════════════════════════════════
         //  终止状态与结果
         // ══════════════════════════════════════════════════════════
 
@@ -127,6 +153,38 @@ public class DefaultReActFactory {
         /** 追加一条工具结果到收集集（AiCallNode 事件中继调用） */
         public void collectToolResult(EventTextUtil.ToolResultView view) {
             toolResultsCollected.add(view);
+        }
+
+        /** 记录步骤开始时间（同一 id 只在首次记录，避免并发下互相覆盖） */
+        public void markStepStarted(String stepId) {
+            if (stepId != null && !stepId.isEmpty()) {
+                stepStartedAt.putIfAbsent(stepId, System.currentTimeMillis());
+            }
+        }
+
+        /** 取出步骤耗时并清理记录；无记录返回 null（前端按"耗时未知"处理） */
+        public Long takeStepElapsedMs(String stepId) {
+            if (stepId == null || stepId.isEmpty()) {
+                return null;
+            }
+            Long startedAt = stepStartedAt.remove(stepId);
+            return startedAt == null ? null : System.currentTimeMillis() - startedAt;
+        }
+
+        /** 累加一次 LLM 调用的 usage（聚合事件携带；无 usageMetadata 的事件直接跳过） */
+        public void accumulateUsage(GenerateContentResponseUsageMetadata metadata) {
+            if (metadata == null) {
+                return;
+            }
+            usagePromptTokens += metadata.promptTokenCount().orElse(0);
+            usageCompletionTokens += metadata.candidatesTokenCount().orElse(0);
+            usageTotalTokens += metadata.totalTokenCount().orElse(0);
+            usageCachedTokens += metadata.cachedContentTokenCount().orElse(0);
+        }
+
+        /** 本回合是否观察到过真实 usage（全 0 视为没有，不下发 usage 事件） */
+        public boolean hasUsage() {
+            return usageTotalTokens > 0 || usagePromptTokens > 0 || usageCompletionTokens > 0;
         }
     }
 

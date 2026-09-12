@@ -10,6 +10,7 @@ import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
+import jainingfei.site.ai.agent.domain.agent.support.ReActStepSink;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -54,8 +55,17 @@ public class UserFeedbackNode extends AbstractAIAgentReActSupport {
             ReActResultDTO result = buildFinalResult(ctx);
             ctx.setResult(result);
 
-            // 3. 发送 done SSE 事件 + 关闭 emitter
-            sendDone(emitter, ctx.getVisibleText().toString());
+            // 3. 收口三连：错误可见 → usage 统计 → done（带 stopReason）
+            //    错误必须在 done 之前发：前端是拿 done 收尾的，先收尾再看错误就晚了
+            String errorMessage = ctx.getErrorMessage();
+            if (errorMessage != null && !errorMessage.isBlank()) {
+                sendError(emitter, errorMessage);
+            }
+            if (ctx.hasUsage()) {
+                sendUsage(emitter, ctx.getUsagePromptTokens(), ctx.getUsageCompletionTokens(),
+                        ctx.getUsageTotalTokens(), ctx.getUsageCachedTokens());
+            }
+            sendDone(emitter, result.getStopReason());
             try {
                 emitter.complete();
             } catch (Exception ignored) {
@@ -106,6 +116,7 @@ public class UserFeedbackNode extends AbstractAIAgentReActSupport {
             String sessionId = ctx.getSessionId();
             if (sessionId != null) {
                 SshSessionBindings.unbindSession(sessionId);
+                ReActStepSink.unbind(sessionId);
                 unbindTerminalSession(sessionId);
                 // 清理工具结果摘要等会话级上下文缓存，避免旧结果污染下一回合
                 chatContextService.clearSessionContext(sessionId);
