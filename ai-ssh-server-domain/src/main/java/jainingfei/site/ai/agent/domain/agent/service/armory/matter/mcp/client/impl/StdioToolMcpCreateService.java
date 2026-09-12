@@ -38,6 +38,9 @@ public class StdioToolMcpCreateService implements ToolMcpCreateService {
     private static final McpJsonMapper JSON_MAPPER = new JacksonMcpJsonMapper(new JsonMapper());
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    /** 加载失败后的冷却窗口：期间不再重试，避免每次 LLM 调用都卡在进程启动/握手超时上 */
+    private static final long FAILURE_COOLDOWN_MS = 60_000L;
+
     @Override
     public BaseToolset createToolset(AiAgentConfigTableVO.Module.ChatModel.ToolMcp toolMcp) {
         AiAgentConfigTableVO.Module.ChatModel.ToolMcp.StdioServerParameters cfg = toolMcp.getStdio();
@@ -51,8 +54,18 @@ public class StdioToolMcpCreateService implements ToolMcpCreateService {
 
         return new BaseToolset() {
             private volatile McpSyncClient session;
+            /** 最近一次加载失败的时间戳（0 = 从未失败） */
+            private volatile long lastFailureAt;
+
+            /**
+             * 取工具列表：<b>失败降级为空工具集</b>（与 remote 策略一致）。
+             * <p>stdio MCP 是外部进程，可能没装、启动失败或握手超时；一次失败不该让整轮对话失败。
+             */
             @Override
             public Flowable<BaseTool> getTools(ReadonlyContext ctx) {
+                if (lastFailureAt > 0 && System.currentTimeMillis() - lastFailureAt < FAILURE_COOLDOWN_MS) {
+                    return Flowable.empty();
+                }
                 return Flowable.defer(() -> {
                     try {
                         if (session == null) {
@@ -62,6 +75,7 @@ public class StdioToolMcpCreateService implements ToolMcpCreateService {
                             log.info("Stdio MCP [{}] session 已建立", name);
                         }
                         List<McpSchema.Tool> tools = session.listTools().tools();
+                        lastFailureAt = 0;
                         log.info("Stdio MCP [{}] 发现 {} 个工具", name, tools.size());
                         return Flowable.fromIterable(tools.stream().map(t -> new BaseTool(t.name(),
                                 t.description() != null ? t.description() : "") {
@@ -83,8 +97,10 @@ public class StdioToolMcpCreateService implements ToolMcpCreateService {
                             }
                         }).toList());
                     } catch (Exception e) {
-                        log.error("Stdio MCP [{}] 失败", name, e);
-                        return Flowable.error(e);
+                        lastFailureAt = System.currentTimeMillis();
+                        log.warn("Stdio MCP [{}] 加载工具失败，本轮降级为空工具集（{} 秒内不再重试）| {}",
+                                name, FAILURE_COOLDOWN_MS / 1000, e.getMessage());
+                        return Flowable.empty();
                     }
                 });
             }

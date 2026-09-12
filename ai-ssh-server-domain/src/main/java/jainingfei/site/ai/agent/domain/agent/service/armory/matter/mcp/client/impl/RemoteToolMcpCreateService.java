@@ -40,6 +40,9 @@ public class RemoteToolMcpCreateService implements ToolMcpCreateService {
     private static final McpJsonMapper JSON_MAPPER = new JacksonMcpJsonMapper(new JsonMapper());
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    /** 加载失败后的冷却窗口：期间不再重试，避免每次 LLM 调用都卡在连接超时上 */
+    private static final long FAILURE_COOLDOWN_MS = 60_000L;
+
     @Override
     public BaseToolset createToolset(AiAgentConfigTableVO.Module.ChatModel.ToolMcp toolMcp) {
         AiAgentConfigTableVO.Module.ChatModel.ToolMcp.RemoteServerParameters cfg = toolMcp.getRemote();
@@ -56,25 +59,38 @@ public class RemoteToolMcpCreateService implements ToolMcpCreateService {
         private final Duration timeout;
         private volatile McpSyncClient session;
         private volatile List<BaseTool> cachedTools;
+        /** 最近一次加载失败的时间戳（0 = 从未失败） */
+        private volatile long lastFailureAt;
 
         RemoteMcpToolsetImpl(String name, String url, Map<String, String> headers, Duration timeout) {
             this.name = name; this.url = url; this.headers = headers; this.timeout = timeout;
         }
 
+        /**
+         * 取工具列表：<b>失败降级为空工具集</b>而不是抛错。
+         * <p>MCP 是可选的外部能力（远端进程/服务可能没起、网络可能不通），一次加载失败不该
+         * 让整轮对话直接失败；降级后本轮对话继续（模型少一批工具），冷却窗口结束再自动重试。
+         */
         @Override
         public Flowable<BaseTool> getTools(ReadonlyContext ctx) {
             if (cachedTools != null) return Flowable.fromIterable(cachedTools);
+            if (lastFailureAt > 0 && System.currentTimeMillis() - lastFailureAt < FAILURE_COOLDOWN_MS) {
+                return Flowable.empty();
+            }
             return Flowable.defer(() -> {
                 try {
                     if (session == null) session = connect();
                     List<McpSchema.Tool> tools = session.listTools().tools();
                     cachedTools = new ArrayList<>();
                     for (McpSchema.Tool t : tools) cachedTools.add(new McpToolAdapter(t, session));
+                    lastFailureAt = 0;
                     log.info("Remote MCP [{}] 发现 {} 个工具", name, cachedTools.size());
                     return Flowable.fromIterable(cachedTools);
                 } catch (Exception e) {
-                    log.error("Remote MCP [{}] 加载工具失败", name, e);
-                    return Flowable.error(e);
+                    lastFailureAt = System.currentTimeMillis();
+                    log.warn("Remote MCP [{}] 加载工具失败，本轮降级为空工具集（{} 秒内不再重试）| url:{} | {}",
+                            name, FAILURE_COOLDOWN_MS / 1000, url, e.getMessage());
+                    return Flowable.empty();
                 }
             });
         }
