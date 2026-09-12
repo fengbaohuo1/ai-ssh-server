@@ -6,11 +6,11 @@ import com.google.adk.artifacts.InMemoryArtifactService;
 import com.google.adk.plugins.BasePlugin;
 import com.google.adk.runner.Runner;
 import com.google.adk.summarizer.EventsCompactionConfig;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.CustomAdkMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.CustomAdkSessionService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.DeterministicEventSummarizer;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.Resource;
@@ -41,18 +41,9 @@ public class CustomRunnerFactory {
     @Resource
     private DeterministicEventSummarizer deterministicEventSummarizer;
 
-    // W4 压缩旋钮（ai.session-governance.compact.*，见 application.yml）
-    @Value("${ai.session-governance.compact.enabled:false}")
-    private boolean compactEnabled;
-
-    /** 触发压缩的 prompt token 阈值——优先读聚合事件 usageMetadata 的真实 promptTokenCount；
-     * 无 usage 事件时框架回退 chars/4 估算（中文场景欠估，按真实 usage 日志校准） */
-    @Value("${ai.session-governance.compact.token-threshold:48000}")
-    private int compactTokenThreshold;
-
-    /** 近端保留的原始事件条数（其余更旧区间折叠为 [历史摘要]） */
-    @Value("${ai.session-governance.compact.event-retention-size:24}")
-    private int compactEventRetentionSize;
+    /** W4 压缩旋钮（ai.session-governance.compact.*，见 application.yml） */
+    @Resource
+    private SessionGovernanceProperties governance;
 
     /**
      * 装配一个 Runner。
@@ -87,16 +78,17 @@ public class CustomRunnerFactory {
 
     /** 压缩配置装配（未启用或阈值非法时返回 null = 框架压缩关闭，旧 trim 语义兜底） */
     private EventsCompactionConfig buildCompactionConfig() {
-        if (!compactEnabled || compactTokenThreshold <= 0 || compactEventRetentionSize <= 0) {
+        SessionGovernanceProperties.Compact compact = governance.getCompact();
+        if (!compact.isEnabled() || compact.getTokenThreshold() <= 0 || compact.getEventRetentionSize() <= 0) {
             return null;
         }
         EventsCompactionConfig config = EventsCompactionConfig.builder()
-                .tokenThreshold(compactTokenThreshold)
-                .eventRetentionSize(compactEventRetentionSize)
+                .tokenThreshold(compact.getTokenThreshold())
+                .eventRetentionSize(compact.getEventRetentionSize())
                 .summarizer(deterministicEventSummarizer)
                 .build();
         log.info("会话压缩已启用: tokenThreshold={} eventRetentionSize={} summarizer={}",
-                compactTokenThreshold, compactEventRetentionSize,
+                compact.getTokenThreshold(), compact.getEventRetentionSize(),
                 deterministicEventSummarizer.getClass().getSimpleName());
         return config;
     }

@@ -9,8 +9,9 @@ import com.google.genai.types.Content;
 import com.google.genai.types.Part;
 import io.reactivex.rxjava3.core.Maybe;
 import jainingfei.site.ai.agent.domain.agent.support.ReasoningTagUtil;
+import jakarta.annotation.Resource;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -42,8 +43,14 @@ public class DeterministicEventSummarizer implements BaseEventSummarizer {
     /** 单条工具参数/结果参与摘要的最大字符数 */
     private static final int PART_TOOL_MAX_CHARS = 240;
 
-    @Value("${ai.session-governance.compact.summary-max-chars:2500}")
-    private int summaryMaxChars;
+    /** 摘要文本预算（ai.session-governance.compact.summary-max-chars） */
+    @Resource
+    private SessionGovernanceProperties governance;
+
+    /** 摘要文本预算（字符） */
+    private int summaryMaxChars() {
+        return governance.getCompact().getSummaryMaxChars();
+    }
 
     @Override
     public Maybe<Event> summarizeEvents(List<Event> events) {
@@ -57,13 +64,13 @@ public class DeterministicEventSummarizer implements BaseEventSummarizer {
         StringBuilder sb = new StringBuilder(SUMMARY_HEADER).append("\n");
         for (Event event : events) {
             appendEventLine(sb, event);
-            if (sb.length() > summaryMaxChars) {
+            if (sb.length() > summaryMaxChars()) {
                 break;
             }
         }
         // 预算硬截断（尾部省略标记）
-        if (sb.length() > summaryMaxChars) {
-            sb.setLength(summaryMaxChars);
+        if (sb.length() > summaryMaxChars()) {
+            sb.setLength(summaryMaxChars());
             sb.append("\n…(摘要已截断)");
         }
         String text = sb.toString();
@@ -128,7 +135,7 @@ public class DeterministicEventSummarizer implements BaseEventSummarizer {
         if (line == null || line.isBlank()) {
             return;
         }
-        if (sb.length() + line.length() + 2 > summaryMaxChars) {
+        if (sb.length() + line.length() + 2 > summaryMaxChars()) {
             return;
         }
         sb.append("- ").append(line).append("\n");

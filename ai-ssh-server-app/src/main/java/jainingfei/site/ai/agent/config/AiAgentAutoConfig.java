@@ -4,6 +4,7 @@ package jainingfei.site.ai.agent.config;
 import com.alibaba.fastjson.JSON;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.AiAgentAutoConfigProperties;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import jainingfei.site.ai.agent.domain.agent.service.IArmoryService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -16,7 +17,7 @@ import java.util.ArrayList;
 
 @Slf4j
 @Configuration
-@EnableConfigurationProperties(AiAgentAutoConfigProperties.class)
+@EnableConfigurationProperties({AiAgentAutoConfigProperties.class, SessionGovernanceProperties.class})
 public class AiAgentAutoConfig implements ApplicationListener<ApplicationReadyEvent> {
 
     @Resource

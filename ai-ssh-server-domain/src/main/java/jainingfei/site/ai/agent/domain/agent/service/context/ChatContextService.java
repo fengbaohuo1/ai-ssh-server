@@ -3,11 +3,11 @@ package jainingfei.site.ai.agent.domain.agent.service.context;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.MilestoneVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.prompt.PromptContextVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.context.provider.ContextProvider;
 import jainingfei.site.ai.agent.domain.agent.service.context.provider.impl.ToolResultProvider;
 import jainingfei.site.ai.agent.domain.agent.service.context.reducer.impl.HybridReducer;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
@@ -61,9 +61,9 @@ public class ChatContextService implements IChatContextService {
 
     private final List<ContextProvider> providers;
 
-    /** 业务侧历史裁剪预算（HybridReducer），默认 8000；可经 ai.session-governance.context-token-budget 覆盖 */
-    @Value("${ai.session-governance.context-token-budget:8000}")
-    private int contextTokenBudget;
+    /** 会话治理参数（业务侧历史裁剪预算 HybridReducer 的兜底值） */
+    @Resource
+    private SessionGovernanceProperties governance;
 
     @Resource
     private HybridReducer hybridReducer;
@@ -109,7 +109,7 @@ public class ChatContextService implements IChatContextService {
         if (history == null || history.isEmpty()) {
             return List.of();
         }
-        return hybridReducer.reduce(history, tokenBudget > 0 ? tokenBudget : contextTokenBudget);
+        return hybridReducer.reduce(history, tokenBudget > 0 ? tokenBudget : governance.getContextTokenBudget());
     }
 
     @Override

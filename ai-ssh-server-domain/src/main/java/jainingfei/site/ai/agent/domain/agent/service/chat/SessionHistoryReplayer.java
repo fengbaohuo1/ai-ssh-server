@@ -9,8 +9,8 @@ import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.agent.adapter.repository.IChatHistoryRepository;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
 import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -52,13 +52,19 @@ public class SessionHistoryReplayer {
     @Resource
     private IChatHistoryRepository chatHistoryRepository;
 
+    /** 会话治理参数（回顾预算 + user 事件上限） */
+    @Resource
+    private SessionGovernanceProperties governance;
+
     /** 回顾总预算（字符） */
-    @Value("${ai.session-governance.cold-start.replay-budget-chars:12000}")
-    private int replayBudgetChars;
+    private int replayBudgetChars() {
+        return governance.getColdStart().getReplayBudgetChars();
+    }
 
     /** 单条 user 事件上限（须小于 user 事件净化上限 max-user-text，避免被净化器截断） */
-    @Value("${ai.session-governance.max-user-text:4000}")
-    private int maxUserText;
+    private int maxUserText() {
+        return governance.getMaxUserText();
+    }
 
     /**
      * 重启重建空会话后调用：读最近消息 → 构造回顾文本 → 按单事件上限分块 →
@@ -78,13 +84,13 @@ public class SessionHistoryReplayer {
 
             List<ChatMessageEntity> recent = chatHistoryRepository.getRecentMessages(
                     sessionId, MAX_CANDIDATE_MESSAGES);
-            String reviewText = buildReviewText(recent, Math.max(replayBudgetChars, 0));
+            String reviewText = buildReviewText(recent, Math.max(replayBudgetChars(), 0));
             if (reviewText.isBlank()) {
                 return;
             }
 
             // 单 user 事件受 sanitizeUserEvent 的 max-user-text 限长约束：分块注入
-            int chunkChars = Math.max(maxUserText - 300, 800);
+            int chunkChars = Math.max(maxUserText() - 300, 800);
             List<String> chunks = chunkText(reviewText, chunkChars);
             int chunkIndex = 0;
             for (String chunk : chunks) {

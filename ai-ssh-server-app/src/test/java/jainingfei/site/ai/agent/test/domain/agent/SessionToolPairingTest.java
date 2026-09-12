@@ -5,11 +5,14 @@ import com.google.adk.sessions.Session;
 import com.google.genai.types.Content;
 import com.google.genai.types.FunctionResponse;
 import com.google.genai.types.Part;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.CompactionSupport;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.CustomAdkSessionService;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.EventGovernor;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.SessionStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -35,21 +38,18 @@ public class SessionToolPairingTest {
     private CustomAdkSessionService sessionService;
 
     @BeforeEach
-    public void setUp() throws Exception {
-        sessionService = new CustomAdkSessionService();
-        // 直接构造的实例没有 Spring 注入，按典型配置手工赋值（小上限便于触发截断分支）
-        setField("maxEvents", 20);
-        setField("maxAssistantText", 200);
-        setField("maxToolText", 300);
-        setField("maxUserText", 200);
-        setField("maxTurns", 4);
-        setField("compactEnabled", false);
-    }
+    public void setUp() {
+        // 治理参数集中在一个配置对象里，单测可直接构造（不再需要反射注入私有字段）
+        SessionGovernanceProperties properties = new SessionGovernanceProperties();
+        properties.setMaxEvents(20);
+        properties.setMaxAssistantText(200);
+        properties.setMaxToolText(300);
+        properties.setMaxUserText(200);
+        properties.setMaxTurns(4);
 
-    private void setField(String name, Object value) throws Exception {
-        Field field = CustomAdkSessionService.class.getDeclaredField(name);
-        field.setAccessible(true);
-        field.set(sessionService, value);
+        EventGovernor governor = new EventGovernor(properties);
+        CompactionSupport compaction = new CompactionSupport(properties, governor);
+        sessionService = new CustomAdkSessionService(new SessionStore(), governor, compaction, properties);
     }
 
     private Session session() {

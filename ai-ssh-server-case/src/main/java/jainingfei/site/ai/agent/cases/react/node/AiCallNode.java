@@ -17,6 +17,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumV
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.TaskStateVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
@@ -24,7 +25,6 @@ import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExec
 import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -53,9 +53,9 @@ import java.util.Map;
 @Component("reactAiCallNode")
 public class AiCallNode extends AbstractAIAgentReActSupport {
 
-    /** 单次 runAsync 内 LLM 调用上限（ADK 托管循环熔断） */
-    @Value("${ai.session-governance.loop.max-llm-calls:30}")
-    private int maxLlmCalls;
+    /** 会话治理参数（含单次 runAsync 的 LLM 调用上限——ADK 托管循环熔断） */
+    @Resource
+    private SessionGovernanceProperties sessionGovernance;
 
     @Resource
     private DefaultArmoryFactory defaultArmoryFactory;
@@ -236,7 +236,7 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                     ctx.getUserId(), ctx.getSessionId(), userContent,
                     RunConfig.builder()
                             .streamingMode(RunConfig.StreamingMode.SSE)
-                            .maxLlmCalls(maxLlmCalls)
+                            .maxLlmCalls(sessionGovernance.getLoop().getMaxLlmCalls())
                             .build());
             events.blockingForEach(event -> handleRunnerEvent(event, ctx));
 
