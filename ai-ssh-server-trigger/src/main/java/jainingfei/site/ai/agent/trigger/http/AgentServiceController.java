@@ -87,8 +87,21 @@ public class AgentServiceController implements IAgentService {
                 dto.setSubAgents(module.getAgents().stream()
                         .map(AiAgentConfigTableVO.Module.Agent::getName)
                         .collect(Collectors.toList()));
+                // 角色与派发关系：谁声明了 sub-agents（编排者）、可以派给谁
+                dto.setAgentRoles(module.getAgents().stream()
+                        .map(a -> {
+                            AiAgentConfigResponseDTO.AgentRoleInfo role = new AiAgentConfigResponseDTO.AgentRoleInfo();
+                            role.setName(a.getName());
+                            role.setDescription(a.getDescription());
+                            role.setOutputKey(a.getOutputKey());
+                            role.setDelegates(a.getSubAgents() == null ? new ArrayList<>() : new ArrayList<>(a.getSubAgents()));
+                            role.setOrchestrator(ObjectUtils.isNotEmpty(a.getSubAgents()));
+                            return role;
+                        })
+                        .collect(Collectors.toList()));
             } else {
                 dto.setSubAgents(new ArrayList<>());
+                dto.setAgentRoles(new ArrayList<>());
             }
 
             // 工作流
@@ -123,6 +136,7 @@ public class AgentServiceController implements IAgentService {
             }
         } else {
             dto.setSubAgents(new ArrayList<>());
+            dto.setAgentRoles(new ArrayList<>());
             dto.setAgentWorkflows(new ArrayList<>());
             dto.setMcpTools(new ArrayList<>());
             dto.setSkills(new ArrayList<>());

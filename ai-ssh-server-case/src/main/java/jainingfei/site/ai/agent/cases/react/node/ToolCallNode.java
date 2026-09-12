@@ -84,9 +84,13 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
             String sessionId = ctx.getSessionId();
             String userId = ctx.getUserId();
             Map<String, Object> r = result.response();
-            String command = r.get("command") instanceof String s ? s : "";
-            Object outputObj = r.get("output");
-            String output = outputObj != null ? outputObj.toString() : "";
+            String command = stringValue(r.get("command"));
+            // 工具返回结构因工具而异：executeCommand = {command, output, success}
+            // 派发类工具（子智能体派发/批量/规划）= {success, result} 或 {success:false, error}
+            String output = firstNonBlank(
+                    stringValue(r.get("output")),
+                    stringValue(r.get("result")),
+                    stringValue(r.get("error")));
             boolean flaggedSuccess = Boolean.TRUE.equals(r.get("success"));
             // 结果文本 = 输出 + [success=...] 标记（里程碑/缓存/记忆共用）
             String resultText = output.isEmpty() ? "(命令无输出)" : output;
@@ -149,6 +153,21 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
             return "";
         }
         return s.length() > max ? s.substring(0, max) : s;
+    }
+
+    /** 对象 → 字符串（null 安全） */
+    private static String stringValue(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    /** 取第一个非空白字符串（派发类工具没有 output 时回退 result / error） */
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
 }

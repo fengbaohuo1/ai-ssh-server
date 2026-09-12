@@ -52,6 +52,11 @@ public class AiAgentConfigResponseDTO {
     private List<String> subAgents;
 
     /**
+     * 智能体角色与派发关系（module.agents[]）：谁能派给谁（教程 2-10 的 sub-agents 配置）
+     */
+    private List<AgentRoleInfo> agentRoles;
+
+    /**
      * 工作流列表（module.agent-workflows）
      */
     private List<AgentWorkflowInfo> agentWorkflows;
@@ -84,8 +89,21 @@ public class AiAgentConfigResponseDTO {
     }
 
     @Data
-    public static class AgentWorkflowInfo {
-        /** 类型：loop / parallel / sequential */
+    public static class AgentRoleInfo {
+        /** 智能体名（module.agents[].name） */
+        private String name;
+        /** 职责描述 */
+        private String description;
+        /** 会话输出键（output-key），写入该智能体自身会话 state */
+        private String outputKey;
+        /** 可派发的子智能体名（sub-agents 声明，空 = 叶子执行者） */
+        private List<String> delegates;
+        /** 是否为编排者（声明了 sub-agents 的智能体不再持有 executeCommand） */
+        private Boolean orchestrator;
+    }
+
+    @Data
+    public static class AgentWorkflowInfo {        /** 类型：loop / parallel / sequential */
         private String type;
         private String name;
         private String description;

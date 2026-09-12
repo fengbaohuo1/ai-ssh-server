@@ -35,8 +35,8 @@ public class AIAgentReActServiceCase implements IAIAgentReActServiceCase {
 
     @Override
     public SseEmitter chatStream(ChatRequestDTO requestDTO) {
-        // 1. 创建 SSE 发射器（3 分钟超时）
-        SseEmitter emitter = new SseEmitter(3 * 60 * 1000L);
+        // 1. 创建 SSE 发射器（10 分钟超时：子智能体派发 + 重试可能几十秒到数分钟，配合 15s 心跳保活）
+        SseEmitter emitter = new SseEmitter(10 * 60 * 1000L);
 
         // 2. 启动心跳保活线程（流结束自动停止）
         AbstractAIAgentReActSupport.startHeartbeat(emitter, requestDTO.getSessionId());

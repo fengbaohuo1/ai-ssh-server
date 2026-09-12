@@ -145,6 +145,13 @@ public class AiAgentConfigTableVO {
             private String description;
             private String outputKey;
 
+            /**
+             * 本智能体挂载的子智能体名单（YAML 键 sub-agents，教程 2-10）。
+             * <p>父子关系是配置而不是代码：声明了子智能体的 Agent 在装配期会被重建为
+             * "只持有派发工具"的编排者（不再直挂 executeCommand），未声明者行为与旧版一致。
+             */
+            private List<String> subAgents;
+
         }
 
         @Data
