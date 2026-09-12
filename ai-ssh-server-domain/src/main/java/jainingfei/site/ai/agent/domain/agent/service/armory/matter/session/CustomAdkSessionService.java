@@ -269,8 +269,29 @@ public class CustomAdkSessionService implements BaseSessionService {
         return normalized;
     }
 
-    /** 解析事件角色：优先 content.role，回退 author。角色判断准确，净化/截断/裁剪才准确 */
+    /**
+     * 解析事件角色：<b>先看结构化 part，再看 content.role，最后回退 author</b>。
+     *
+     * <p>为什么不能只看 content.role：ADK 的 {@code Functions.buildResponseEvent} 把工具结果事件的
+     * content.role 设成 <b>"user"</b>（Gemini 风格：函数结果算作 user 轮内容）。只按 role 判断会把
+     * 工具结果当"用户消息"送进 {@link #sanitizeUserEvent}——一旦其 stringify 文本超过 user 上限，
+     * 就会被重建成<b>纯文本 user 事件</b>，FunctionResponse part（id/name/response）随之丢失，
+     * 下一轮历史重建就凑不出 tool 消息与 assistant tool_calls 的配对，provider 直接 400：
+     * <pre>
+     *   "An assistant message with 'tool_calls' must be followed by tool messages
+     *    responding to each 'tool_call_id'."
+     * </pre>
+     * 因此结构化优先：带 FunctionResponse 的事件一律是工具结果，带 FunctionCall 的按助手事件处理
+     * （只影响限长方式，不影响角色语义）。
+     */
     private String resolveRole(Event event) {
+        List<Part> parts = event.content().flatMap(Content::parts).orElse(List.of());
+        if (parts.stream().anyMatch(p -> p.functionResponse().isPresent())) {
+            return "tool";
+        }
+        if (parts.stream().anyMatch(p -> p.functionCall().isPresent())) {
+            return "model";
+        }
         return event.content().flatMap(Content::role).orElse(event.author());
     }
 
