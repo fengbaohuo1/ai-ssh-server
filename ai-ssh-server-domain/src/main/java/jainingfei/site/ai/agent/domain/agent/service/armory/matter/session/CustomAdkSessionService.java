@@ -193,7 +193,7 @@ public class CustomAdkSessionService implements BaseSessionService {
             // 回放 tool 消息配对），只对响应里的字符串字段做 head/tail 限长
             normalized = truncateToolEvent(normalized);
         } else if (isAssistantRole(role)) {
-            // assistant 事件可能携带"隐藏草稿标记"（DeepSeek thinking 草稿随文本落库）：
+            // assistant 事件可能携带"隐藏草稿标记"（推理内容随文本落库）：
             // 限长只作用于可见正文，标记区（base64 草稿）不参与 head/tail 截断，防止标记损坏；
             // 带 FunctionCall parts 的事件只限长文本部分，绝不 stringify 破坏工具调用结构
             normalized = truncateAssistantEvent(normalized);
@@ -427,10 +427,10 @@ public class CustomAdkSessionService implements BaseSessionService {
     }
 
     /**
-     * assistant 事件限长（结构化版本，V3）：隐藏草稿标记区（DeepSeek reasoning_content
+     * assistant 事件限长（结构化版本，V3）：隐藏草稿标记区（provider 的 reasoning_content
      * 随文本落库）不参与 head/tail 截断，避免截断损坏 base64 标记导致下轮无法解析草稿；
      * 携带 FunctionCall parts 的事件只限长文本部分，FunctionCall parts 原样保留——
-     * 历史重建需要"完整工具调用结构 + 草稿标记"才能回传 DeepSeek，stringify 成纯文本会破坏配对。
+     * 历史重建需要"完整工具调用结构 + 草稿标记"才能回传推理内容，stringify 成纯文本会破坏配对。
      */
     private Event truncateAssistantEvent(Event event) {
         String text = event.stringifyContent();

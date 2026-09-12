@@ -24,7 +24,7 @@ import java.util.Optional;
  *
  * <p>为什么是"user 回顾文本"而不是逐条全真事件回放（约束见 FixedSpringAI）：
  * <ul>
- *   <li>无草稿标记的纯文本 assistant 事件在历史重建时被整条跳过（DeepSeek thinking 防 400）——
+ *   <li>无草稿标记的纯文本 assistant 事件在历史重建时被整条跳过（思考模型防 400）——
  *       直接回放 DB 的可见文本 assistant 行会被滤掉；</li>
  *   <li>带 FunctionCall 的 assistant 事件需与 tool 消息配对，而 DB 只存可见文本，
  *       FC 参数与推理草稿均未落库，重建会破坏配对或触发 400；</li>

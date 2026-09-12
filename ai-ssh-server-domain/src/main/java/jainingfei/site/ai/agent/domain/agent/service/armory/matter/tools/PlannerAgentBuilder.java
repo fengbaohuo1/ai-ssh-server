@@ -11,11 +11,11 @@ import com.google.adk.sessions.InMemorySessionService;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.adk.FixedSpringAI;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelBundle;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.SpringAiLlmAdapter;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ModelTuning;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
@@ -32,8 +32,8 @@ import java.util.concurrent.TimeUnit;
  *       计划的可执行性由后续的校验器与执行器保证</li>
  *   <li><b>纯内存会话 + 跑完即弃</b>：InMemory 三件套，不落库、不复用；它是一张草稿纸，
  *       不是需要追溯的正式会话</li>
- *   <li><b>模型走统一入口且关闭思考</b>：规划输出是结构化 JSON，思考过程没有收益，
- *       只增加时延与 token 成本（模型仍来自 {@link ChatModelFactory}，本类零厂商类型）</li>
+ *   <li><b>模型走统一入口</b>：规划输出是结构化 JSON，推理强度取服务端默认（不额外加压），
+ *       模型由 {@link ChatModelFactory} 提供，本类不出现任何厂商类型</li>
  * </ol>
  */
 @Slf4j
@@ -68,12 +68,13 @@ public class PlannerAgentBuilder {
     public String plan(AiAgentConfigTableVO.Module.ChatModel modelConfig, String userRequest,
                        List<String> allowedAgents) {
         String allowed = String.join(",", allowedAgents);
-        ChatModelBundle bundle = chatModelFactory.create(modelConfig, ModelTuning.deterministic(null));
+        // 规划器模型：同一通道、同一份配置，不额外加压（推理强度取服务端默认）
+        ChatModel plannerModel = chatModelFactory.create(modelConfig, ModelTuning.deterministic(null));
 
         BaseAgent planner = LlmAgent.builder()
                 .name("DynamicTaskPlanner")
                 .description("多 Agent 任务规划器：把用户任务拆成带依赖关系的子任务计划")
-                .model(new FixedSpringAI(bundle))
+                .model(new SpringAiLlmAdapter(plannerModel))
                 .instruction(INSTRUCTION + "\n允许Agent:" + allowed)
                 .build();
 

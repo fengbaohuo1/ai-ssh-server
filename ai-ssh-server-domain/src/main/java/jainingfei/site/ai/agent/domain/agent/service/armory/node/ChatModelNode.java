@@ -9,7 +9,6 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySupport;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.mcp.client.factory.McpCreateFactory;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelBundle;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.skills.ToolSkillsCreateService;
 import lombok.extern.slf4j.Slf4j;
@@ -68,13 +67,11 @@ public class ChatModelNode extends AbstractArmorySupport {
             log.info("Skills → BaseToolset");
         }
 
-        // 3. ChatModel：唯一入口 ChatModelFactory（厂商类型只存在于 bundle 实现内部）
-        ChatModelBundle chatModelBundle = chatModelFactory.createMain(chatModelConfig);
-        dynamicContext.setChatModelBundle(chatModelBundle);
-        dynamicContext.setChatModel(chatModelBundle.chatModel());
+        // 3. ChatModel：唯一入口 ChatModelFactory（OpenAI 兼容通道，代码里不出现厂商类型）
+        dynamicContext.setChatModel(chatModelFactory.createMain(chatModelConfig));
 
-        log.info("ChatModelNode 装配完成（provider:{}, model:{}, reasoningEffort:{}）, mcpToolsets:{}",
-                chatModelBundle.providerName(), chatModelConfig.getModel(), chatModelConfig.getReasoningEffort(),
+        log.info("ChatModelNode 装配完成（model:{}, reasoningEffort:{}, streamUsage:true）, mcpToolsets:{}",
+                chatModelConfig.getModel(), chatModelConfig.getReasoningEffort(),
                 dynamicContext.getMcpToolsets().size());
         return router(requestParameter, dynamicContext);
     }

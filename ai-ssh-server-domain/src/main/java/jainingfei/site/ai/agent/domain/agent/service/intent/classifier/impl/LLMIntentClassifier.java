@@ -109,7 +109,7 @@ public class LLMIntentClassifier implements IIntentClassifier {
         modelConfig.setModel(modelName);
         this.chatModel = chatModelFactory.create(modelConfig, ModelTuning.builder()
                 .temperature(0.1)
-                .build()).chatModel();
+                .build());
         log.info("意图识别模型已装配 | model:{} | temperature:0.1", modelName);
     }
 

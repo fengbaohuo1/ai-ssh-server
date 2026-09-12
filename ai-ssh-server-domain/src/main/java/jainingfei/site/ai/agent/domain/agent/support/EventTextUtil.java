@@ -22,7 +22,7 @@ import java.util.Optional;
  *   <li>聚合事件（partial 为空）→ 文本与已累积分片相等时返回 null（去重）；
  *       不一致（如非流式单事件）则整体返回</li>
  * </ul>
- * 隐藏草稿标记（DeepSeek reasoning_content 落库载体）在提取时一律剥除——展示与同步聚合
+ * 隐藏草稿标记（provider 的 reasoning_content 落库载体）在提取时一律剥除——展示与同步聚合
  * 出口不泄漏 marker，仅 ADK 会话事件保留。
  */
 public final class EventTextUtil {
