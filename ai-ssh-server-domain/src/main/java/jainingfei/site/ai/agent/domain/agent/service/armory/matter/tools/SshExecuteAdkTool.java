@@ -47,8 +47,15 @@ public class SshExecuteAdkTool extends BaseTool {
             Pattern.CASE_INSENSITIVE
     );
 
-    /** sessionId → connectionId（静态，多会话安全） */
+    /** sessionId → connectionId（静态，多会话安全；主链路 ChatService 在 runAsync 前写入） */
     private static final ConcurrentHashMap<String, String> sessionConnections = new ConcurrentHashMap<>();
+
+    /**
+     * 会话 state 中承载 SSH 终端会话 ID 的键。
+     * <p>子智能体派发链路用它透传：派发时把父会话绑定的 connectionId 写进<b>子会话初始 state</b>，
+     * 子智能体的工具从自身 state 读取——state 随会话走，与命令在哪个线程执行无关。
+     */
+    public static final String STATE_KEY_TERMINAL_SESSION = "terminalSessionId";
 
     @Resource
     private ISshTerminalService sshTerminalService;
@@ -69,6 +76,14 @@ public class SshExecuteAdkTool extends BaseTool {
      */
     public static void unbindSession(String sessionId) {
         sessionConnections.remove(sessionId);
+    }
+
+    /**
+     * 查询会话绑定的 SSH 连接 ID（只读）。
+     * <p>供派发链路把父会话的终端会话透传给子会话；未绑定时返回 null。
+     */
+    public static String connectionOf(String sessionId) {
+        return sessionId == null ? null : sessionConnections.get(sessionId);
     }
 
     public SshExecuteAdkTool() {
@@ -105,9 +120,9 @@ public class SshExecuteAdkTool extends BaseTool {
     }
 
     private Map<String, Object> execute(Map<String, Object> args, ToolContext ctx) {
-        // 通过 ADK 会话 ID 从静态 map 中读取 connectionId（ChatService 在调用前写入）
+        // 终端会话解析：子会话 state 优先（派发链路写入），回退主链路静态绑定表
         String sessionId = ctx.invocationContext().session().id();
-        String connectionId = sessionConnections.get(sessionId);
+        String connectionId = resolveTerminalSession(ctx);
 
         String command = (String) args.get("command");
         log.debug("[EXEC] connectionId={} command='{}'", connectionId, command);
@@ -137,6 +152,30 @@ public class SshExecuteAdkTool extends BaseTool {
         emptyCallCounters.remove(connectionId);
 
         return doExecute(sessionId, connectionId, command);
+    }
+
+    /**
+     * 从工具上下文解析"当前应在哪条 SSH 连接上执行"（两级来源）：
+     * <ol>
+     *   <li><b>会话 state</b>：子智能体派发链路——派发时把父会话绑定的 connectionId 写进子会话初始 state，
+     *       随会话走，与工具在哪个线程执行无关（教程用 ThreadLocal，在 ADK 的 io 线程/线程池下不可靠）</li>
+     *   <li><b>静态绑定表</b>：主链路——ChatService 在 runAsync 前 {@code bindSession}，键为 ADK 会话 ID</li>
+     * </ol>
+     * 派发工具也复用本方法，把父会话的终端会话透传给子会话。
+     */
+    public static String resolveTerminalSession(ToolContext ctx) {
+        if (ctx == null) {
+            return null;
+        }
+        try {
+            Object fromState = ctx.state().get(STATE_KEY_TERMINAL_SESSION);
+            if (fromState instanceof String stateValue && !stateValue.isBlank()) {
+                return stateValue;
+            }
+        } catch (Exception e) {
+            log.debug("[EXEC] 会话 state 读取失败，回退静态绑定表: {}", e.getMessage());
+        }
+        return connectionOf(ctx.sessionId());
     }
 
     /**
