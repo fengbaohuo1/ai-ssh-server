@@ -4,6 +4,7 @@ import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
+import jainingfei.site.ai.agent.cases.react.SseSteps;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
@@ -11,9 +12,11 @@ import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
+import jainingfei.site.ai.agent.domain.agent.support.ReActStepSink;
 import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -82,6 +85,11 @@ public class RootNode extends AbstractAIAgentReActSupport {
                 terminalSessionId = bound;
             }
         }
+
+        // 3.5 绑定本回合的步骤出口（SSE 步骤协议 v2）：子智能体在线程池里跑，
+        //     它的命令与输出要靠这个出口才能挂到父回合的工具卡片下面（解绑在 UserFeedbackNode 收口）
+        SseEmitter turnEmitter = ctx.getEmitter();
+        ReActStepSink.bind(sessionId, step -> SseSteps.sendStep(turnEmitter, step));
 
         // 4. 初始化上下文
         ctx.setSessionId(sessionId);

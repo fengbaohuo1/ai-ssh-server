@@ -1,5 +1,8 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
+import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
+import jainingfei.site.ai.agent.domain.agent.support.ReActStepSink;
 import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
+import jainingfei.site.ai.agent.domain.agent.support.StepEvents;
 
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.RunConfig;
@@ -17,6 +20,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +89,9 @@ public class SubAgentDispatchService {
             // 确定性错误：重试一百次也不会有，直接失败且 attempts 保持 0（不浪费重试与退避时间）
             task.setStatus(TaskStatus.FAILED);
             task.setError("agent not found: " + task.getAgentName());
+            // 界面上也要有始有终：先补一张派发卡片再给终态，否则这一格永远是空白
+            reportTaskStarted(context, task, taskStepId(task, context), 1);
+            reportTaskFinished(context, task, taskStepId(task, context), false);
             log.warn("子Agent不存在 | agent={} | appName={} | task={}",
                     task.getAgentName(), context.getAppName(), task.getTaskId());
             return;
@@ -98,10 +105,15 @@ public class SubAgentDispatchService {
         String invocationId = UUID.randomUUID().toString();
         String appName = agent.name();
 
+        // 步骤树节点 id：单派发时父步骤（工具调用）与任务同 id，卡片原地升级为派发卡片；
+        // 批量/规划派发时每个任务一个 id，嵌在批量卡片下面
+        String stepId = taskStepId(task, context);
+
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             task.setAttempts(attempt);
             String sessionId = "subagent-" + invocationId + "-" + attempt;
             long startedAt = System.currentTimeMillis();
+            reportTaskStarted(context, task, stepId, maxAttempts);
             try {
                 Runner runner = runnerFactory.createForSubAgent(agent);
                 createSubSession(runner, appName, sessionId, context.getTerminalSessionId());
@@ -110,17 +122,23 @@ public class SubAgentDispatchService {
                         task.getAgentName(), task.getTaskId(), attempt, maxAttempts, timeoutSeconds, sessionId,
                         context.getTerminalSessionId());
                 Content content = Content.fromParts(Part.fromText(task.getRequest()));
-                List<Event> events = runner.runAsync(SUBAGENT_USER_ID, sessionId, content,
+                // 边收边发：子智能体的事件既用于收敛结论，也实时翻译成步骤上报给前端
+                // （旧实现 toList().blockingGet() 把事件一次吃光，界面上看不到子智能体做了什么）
+                List<Event> events = new ArrayList<>();
+                runner.runAsync(SUBAGENT_USER_ID, sessionId, content,
                                 RunConfig.builder().autoCreateSession(true).build())
                         .timeout(timeoutSeconds, TimeUnit.SECONDS)
-                        .toList()
-                        .blockingGet();
+                        .blockingForEach(event -> {
+                            events.add(event);
+                            reportChildEvent(context, event, stepId, agent.name());
+                        });
 
                 String result = SubAgentResultExtractor.pickFinalText(events);
                 if (result.isBlank()) {
                     // 结果为空 = 模型没给出结论：不重试（变更类任务重跑有副作用），直接失败让父智能体决策
                     task.setStatus(TaskStatus.FAILED);
                     task.setError("empty sub agent result");
+                    reportTaskFinished(context, task, stepId, false);
                     log.warn("子Agent结果为空 | agent={} | task={} | events={}",
                             task.getAgentName(), task.getTaskId(), events.size());
                     return;
@@ -128,6 +146,7 @@ public class SubAgentDispatchService {
 
                 task.setResult(result);
                 task.setStatus(TaskStatus.COMPLETED);
+                reportTaskFinished(context, task, stepId, true);
                 log.info("子Agent执行完成 | agent={} | task={} | attempts={} | 耗时={}ms | resultLength={}",
                         task.getAgentName(), task.getTaskId(), attempt,
                         System.currentTimeMillis() - startedAt, result.length());
@@ -141,6 +160,7 @@ public class SubAgentDispatchService {
                 } else {
                     task.setStatus(TaskStatus.FAILED);
                     task.setError("attempts=" + attempt + " | " + e.getMessage());
+                    reportTaskFinished(context, task, stepId, false);
                     log.error("子Agent执行失败（重试耗尽） | agent={} | task={} | attempts={} | 耗时={}ms",
                             task.getAgentName(), task.getTaskId(), attempt,
                             System.currentTimeMillis() - startedAt, e);
@@ -148,6 +168,84 @@ public class SubAgentDispatchService {
             } finally {
                 recycleSession(appName, sessionId);
             }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  步骤上报（SSE 步骤协议 v2：把子智能体的动作挂到父回合的卡片下面）
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * 任务的步骤节点 id：统一用 {@code taskId}。
+     *
+     * <p>单派发时工具层把 {@code taskId} 直接取成本次工具调用 id，
+     * 于是"父级工具卡片"与"任务节点"是同一个 id → 前端按 id upsert 后原地升级成派发卡片，
+     * 不会多出一层同名嵌套；批量/规划派发时每个任务一个 id，挂在批量卡片下面。
+     */
+    private static String taskStepId(DynamicTask task, AgentExecutionContext context) {
+        return task.getTaskId() != null && !task.getTaskId().isBlank()
+                ? task.getTaskId()
+                : context.getStepId();
+    }
+
+    /** 任务开始：派发卡片进入"运行中"（带子智能体名、任务指令、重试次数） */
+    private void reportTaskStarted(AgentExecutionContext context, DynamicTask task,
+                                   String stepId, int maxAttempts) {
+        ReActStepSink sink = context.getStepSink();
+        if (sink == null) {
+            return;
+        }
+        sink.emit(StepEvents.with(
+                StepEvents.toolCall(stepId, task.getAgentName(),
+                        Map.of("request", task.getRequest() == null ? "" : task.getRequest()),
+                        StepEvents.K_AGENT, context.getStepId()),
+                StepEvents.F_ATTEMPT, task.getAttempts() == null ? 1 : task.getAttempts()));
+    }
+
+    /** 任务终态：成功/失败 + 结论或错误 + 耗时（挂在父工具调用下，与任务开始同一 id） */
+    private void reportTaskFinished(AgentExecutionContext context, DynamicTask task,
+                                    String stepId, boolean success) {
+        ReActStepSink sink = context.getStepSink();
+        if (sink == null) {
+            return;
+        }
+        Object result = success
+                ? Map.of("success", true, "result", task.getResult() == null ? "" : task.getResult())
+                : Map.of("success", false, "error", task.getError() == null ? "unknown error" : task.getError());
+        Map<String, Object> step = StepEvents.toolResult(stepId, task.getAgentName(), result, success, null);
+        sink.emit(StepEvents.with(step, StepEvents.F_PARENT, context.getStepId()));
+    }
+
+    /**
+     * 子智能体自己的事件 → 嵌套步骤（{@code p = 任务步骤 id}）。
+     *
+     * <p>只上报工具调用/结果：子智能体的正文是"它自己的思考"，混进父回合的聊天正文会污染回答，
+     * 它真正要交付的东西已经由 {@link SubAgentResultExtractor} 收敛进任务的 result。
+     */
+    private void reportChildEvent(AgentExecutionContext context, Event event,
+                                  String parentStepId, String childAgentName) {
+        ReActStepSink sink = context.getStepSink();
+        if (sink == null) {
+            return;
+        }
+        try {
+            for (EventTextUtil.ToolCallView call : EventTextUtil.functionCalls(event)) {
+                Map<String, Object> step = StepEvents.toolCall(call.id(), call.name(), call.args(),
+                        StepEvents.K_TOOL, parentStepId);
+                sink.emit(StepEvents.with(step, StepEvents.F_AGENT, childAgentName));
+            }
+            for (EventTextUtil.ToolResultView result : EventTextUtil.functionResponses(event)) {
+                Map<String, Object> response = result.response();
+                boolean success = !Boolean.FALSE.equals(response.get("success"));
+                Map<String, Object> step = StepEvents.toolResult(result.id(), result.name(), response,
+                        success, null);
+                // 结果同样要挂回发起它的那一步（缺 p 会变成顶层孤儿卡片）
+                sink.emit(StepEvents.with(
+                        StepEvents.with(step, StepEvents.F_PARENT, parentStepId),
+                        StepEvents.F_AGENT, childAgentName));
+            }
+        } catch (Exception e) {
+            log.debug("子智能体步骤上报失败 agent={}: {}", childAgentName, e.getMessage());
         }
     }
 

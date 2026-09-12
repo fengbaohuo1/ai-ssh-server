@@ -1,5 +1,6 @@
 package jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic;
 
+import jainingfei.site.ai.agent.domain.agent.support.ReActStepSink;
 import lombok.Builder;
 import lombok.Value;
 
@@ -42,5 +43,18 @@ public class AgentExecutionContext {
 
     /** 当前执行的任务 ID（预留） */
     String taskId;
+
+    /**
+     * 父回合的步骤出口（SSE 步骤协议 v2，可为 null）。
+     * <p>子智能体在线程池里跑，它的命令与输出只能靠这个出口挂到父回合的工具卡片下面；
+     * 未绑定（同步 chat / 单测 / 工具被直接调用）时为 null，派发链路按"没有界面可发"降级。
+     */
+    ReActStepSink stepSink;
+
+    /**
+     * 父步骤 id = 触发本次派发的工具调用 id（ADK functionCallId）。
+     * <p>前端据此把子智能体的步骤嵌到正确的卡片下面；为空时子步骤按顶层渲染。
+     */
+    String stepId;
 
 }

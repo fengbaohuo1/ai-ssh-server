@@ -75,8 +75,11 @@ public class SubAgentDispatchTool extends BaseTool {
         return Single.<Map<String, Object>>fromCallable(() -> {
             AgentExecutionContext context = SubAgentDispatchContext.from(toolContext);
 
+            // taskId 取本次工具调用 id：让"派发卡片"与"任务节点"共用同一个步骤 id，
+            // 前端按 id upsert 后原地升级（子智能体的命令挂在它下面），不再多一层同名嵌套
+            String stepId = context.getStepId();
             DynamicTask task = DynamicTask.builder()
-                    .taskId("dispatch-" + UUID.randomUUID())
+                    .taskId(stepId != null && !stepId.isBlank() ? stepId : "dispatch-" + UUID.randomUUID())
                     .agentName(subAgent.name())
                     .request(request)
                     .build();
