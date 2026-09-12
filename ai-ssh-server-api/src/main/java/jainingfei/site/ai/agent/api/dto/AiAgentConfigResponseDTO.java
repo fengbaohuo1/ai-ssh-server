@@ -10,7 +10,8 @@ import java.util.List;
  * 除基础 agentId/agentName/agentDesc 外，回传配置文件（agent/*.yml）中的真实模型与能力信息，
  * 供前端只读展示：
  * <ul>
- *   <li>chatModel：模型名 / baseUrl / 上下文窗口（contextSize）/ 推理强度（reasoningEffort）——<b>不含 apiKey</b></li>
+ *   <li>chatModel：通道（provider + 能力声明）/ 模型名 / baseUrl / 上下文窗口（contextSize）/
+ *       推理强度（reasoningEffort）——<b>不含 apiKey</b></li>
  *   <li>subAgents / agentWorkflows：模块内子智能体与工作流</li>
  *   <li>mcpTools / skills / plugins：MCP 工具、技能目录、运行插件（未配置为空列表）</li>
  * </ul>
@@ -78,6 +79,12 @@ public class AiAgentConfigResponseDTO {
 
     @Data
     public static class ChatModelInfo {
+        /** 模型通道 id（chat-model.provider，空配置回填默认通道） */
+        private String provider;
+        /** 模型通道展示名 */
+        private String providerName;
+        /** 通道能力声明（前端只读展示"这条通道能做什么"） */
+        private CapabilitiesInfo capabilities;
         /** 模型名（chat-model.model） */
         private String modelName;
         /** 服务地址（chat-model.base-url） */
@@ -86,6 +93,26 @@ public class AiAgentConfigResponseDTO {
         private Long contextSize;
         /** 推理强度（chat-model.reasoning-effort，可为空=未配置） */
         private String reasoningEffort;
+    }
+
+    /**
+     * 通道能力信息（与后端 {@code ProviderCapabilities} 一一对应）——前端只读展示，
+     * 让"这条通道少了什么能力"在界面上看得见，而不是等到用起来才发现静默降级。
+     */
+    @Data
+    public static class CapabilitiesInfo {
+        /** 流式响应能否拿到思考草稿 */
+        private Boolean reasoningDraftStreaming;
+        /** 请求侧能否把思考草稿回写给服务端 */
+        private Boolean reasoningDraftReplay;
+        /** 通用 usage 字段是否带缓存命中 */
+        private Boolean cacheMetricsGeneric;
+        /** 能否显式开关思考 */
+        private Boolean thinkingToggle;
+        /** 该通道接受的推理强度取值 */
+        private List<String> reasoningEffortValues;
+        /** 一句人话说明 */
+        private String note;
     }
 
     @Data

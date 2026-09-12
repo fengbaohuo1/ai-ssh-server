@@ -9,6 +9,8 @@ import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatSessionEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ChatModelFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderCapabilities;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
 import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
@@ -58,6 +60,35 @@ public class AgentServiceController implements IAgentService {
         }
     }
 
+    /**
+     * 通道能力声明（唯一出处：{@link ProviderCapabilities}）。
+     * <p>配置写了未知通道时返回 {@code null} 而不是抛错——配置回传要能把"写错了"展示出来，
+     * 真正的 fail-fast 在装配期（{@link ChatModelFactory#createMain}）。
+     */
+    private static ProviderCapabilities resolveCapabilities(String providerId) {
+        try {
+            return ProviderCapabilities.forProvider(providerId);
+        } catch (IllegalArgumentException e) {
+            log.warn("配置回传遇到未知模型通道: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 通道能力声明 → 响应 DTO */
+    private static AiAgentConfigResponseDTO.CapabilitiesInfo toCapabilitiesInfo(ProviderCapabilities capabilities) {
+        if (capabilities == null) {
+            return null;
+        }
+        AiAgentConfigResponseDTO.CapabilitiesInfo info = new AiAgentConfigResponseDTO.CapabilitiesInfo();
+        info.setReasoningDraftStreaming(capabilities.isReasoningDraftStreaming());
+        info.setReasoningDraftReplay(capabilities.isReasoningDraftReplay());
+        info.setCacheMetricsGeneric(capabilities.isCacheMetricsGeneric());
+        info.setThinkingToggle(capabilities.isThinkingToggle());
+        info.setReasoningEffortValues(capabilities.getReasoningEffortValues());
+        info.setNote(capabilities.getNote());
+        return info;
+    }
+
     /** 配置表 VO → 响应 DTO（剔除 apiKey 等机密；模块/能力缺省为空列表） */
     private static AiAgentConfigResponseDTO toConfigResponse(AiAgentConfigTableVO vo) {
         if (vo == null || vo.getAgent() == null) {
@@ -75,6 +106,10 @@ public class AgentServiceController implements IAgentService {
             AiAgentConfigTableVO.Module.ChatModel chatModel = module.getChatModel();
             if (chatModel != null) {
                 AiAgentConfigResponseDTO.ChatModelInfo modelInfo = new AiAgentConfigResponseDTO.ChatModelInfo();
+                ProviderCapabilities capabilities = resolveCapabilities(chatModel.getProvider());
+                modelInfo.setProvider(ChatModelFactory.normalizeProviderId(chatModel.getProvider()));
+                modelInfo.setProviderName(capabilities == null ? null : capabilities.getDisplayName());
+                modelInfo.setCapabilities(toCapabilitiesInfo(capabilities));
                 modelInfo.setModelName(chatModel.getModel());
                 modelInfo.setBaseUrl(chatModel.getBaseUrl());
                 modelInfo.setContextSize(chatModel.getContextSize());
