@@ -12,6 +12,9 @@ target/
 *.iml
 *.ipr
 
+### AI 工具计划导出（不属于项目源码） ###
+.zcode/
+
 ### Eclipse ###
 .apt_generated
 .classpath
