@@ -39,10 +39,14 @@ public class SpringAiPromptAssembler {
 
     private final ChatModel chatModel;
     private final ReasoningDraftProtocol draftProtocol;
+    /** 通道的草稿载体（null = 通用元数据约定） */
+    private final ReasoningDraftAccess draftAccess;
 
-    public SpringAiPromptAssembler(ChatModel chatModel, ReasoningDraftProtocol draftProtocol) {
+    public SpringAiPromptAssembler(ChatModel chatModel, ReasoningDraftProtocol draftProtocol,
+                                   ReasoningDraftAccess draftAccess) {
         this.chatModel = chatModel;
         this.draftProtocol = draftProtocol;
+        this.draftAccess = draftAccess;
     }
 
     /** ADK 请求 → Spring AI Prompt（含 system/user/历史消息与工具 options） */
@@ -65,8 +69,8 @@ public class SpringAiPromptAssembler {
                     break;
                 case "model":
                 case "assistant":
-                    // 思考模型：历史 assistant 需要携带推理内容回传；解析规则见 ReasoningDraftProtocol
-                    messages.addAll(draftProtocol.toHistoryMessages(content));
+                    // 思考模型：历史 assistant 需要携带推理内容回传；载体与解析规则见 ReasoningDraftProtocol
+                    messages.addAll(draftProtocol.toHistoryMessages(content, draftAccess));
                     break;
                 default:
                     messages.addAll(toUserMessages(content));

@@ -28,7 +28,7 @@ import java.util.Map;
  * 各家 provider 模块自己决定怎么把它变成线上字段；调用方因此不必认识任何厂商类型。
  *
  * <p>与 {@link ReasoningDraftAccess} 的分工：本类只管"约定与策略"（标记怎么读写、历史怎么重建），
- * 具体读法（元数据键 / 厂商专有消息类型）由通道档案通过 access 提供；通道不提供时降级为空。
+ * 具体载体（元数据键 / 厂商专有消息类型）由通道档案通过 access 提供；通道不提供时降级为通用约定。
  */
 @Slf4j
 public class ReasoningDraftProtocol {
@@ -61,6 +61,9 @@ public class ReasoningDraftProtocol {
     /**
      * 构造历史 assistant 消息：草稿写进元数据（协议层回放），正文与工具调用照常。
      *
+     * <p>这是<b>通用载体</b>；原生通道有专有消息子类时由
+     * {@link ReasoningDraftAccess#buildHistoryMessage} 覆盖。
+     *
      * @param visibleText 可见正文（空串合法：内容由 toolCalls 承载）
      * @param reasoning   草稿，可为 null
      * @param toolCalls   工具调用，可为空
@@ -90,8 +93,10 @@ public class ReasoningDraftProtocol {
      * 无草稿标记的纯文本事件跳过（防"原响应有草稿却未回传"的 400）；
      * 但<b>携带 FunctionCall 的事件必须保留</b>（tool 消息要与前置 tool_calls 配对），
      * 无标记时构造不带草稿的消息即可。
+     *
+     * @param access 通道的草稿载体（null = 通用元数据约定）
      */
-    public List<Message> toHistoryMessages(Content content) {
+    public List<Message> toHistoryMessages(Content content, ReasoningDraftAccess access) {
         StringBuilder text = new StringBuilder();
         List<AssistantMessage.ToolCall> toolCalls = new ArrayList<>();
 
@@ -117,7 +122,10 @@ public class ReasoningDraftProtocol {
         if (reasoning == null && toolCalls.isEmpty()) {
             return List.of();
         }
-        return List.of(buildHistoryMessage(visible, reasoning, toolCalls));
+        // 优先用通道自己的载体（原生通道需要专有消息类型才能把草稿回传给服务端）
+        AssistantMessage message = access == null ? null
+                : access.buildHistoryMessage(visible, reasoning, toolCalls);
+        return List.of(message != null ? message : buildHistoryMessage(visible, reasoning, toolCalls));
     }
 
     /** 把草稿包装成事件文本前缀（落库用） */

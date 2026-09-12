@@ -102,16 +102,17 @@ public interface IIntentService {
     /**
      * 注入智能体的 API 配置，供 LLM 意图分类器复用。
      * <p>
-     * 由调用方（如 AiCallNode）在分类前传入 Agent 装配好的 baseUrl/apiKey/模型名，
-     * 使得意图识别不再需要单独配置模型，而是使用各智能体自己的配置。
+     * 由调用方（如 AiCallNode）在分类前传入 Agent 装配好的通道与 baseUrl/apiKey/模型名，
+     * 使得意图识别不再需要单独配置模型，而是使用各智能体自己的配置（含同一模型通道）。
      * <p>
-     * 注意：spring-ai 2.x 已移除 OpenAiApi 类，故此处直接传三段配置字符串，
-     * 由 LLMIntentClassifier 内部用 OpenAiChatOptions 构建独立 ChatModel。
+     * 注意：spring-ai 2.x 已移除 OpenAiApi 类，故此处直接传配置字符串，
+     * 由 LLMIntentClassifier 经统一模型工厂构建独立 ChatModel。
      *
+     * @param provider  模型通道 id（与 Agent 装配链路同一通道；空 = 默认通道）
      * @param baseUrl   Agent 装配链路中的 API baseUrl
      * @param apiKey    Agent 装配链路中的 API key
      * @param modelName Agent 配置的模型名
      */
-    void configure(String baseUrl, String apiKey, String modelName);
+    void configure(String provider, String baseUrl, String apiKey, String modelName);
 
 }

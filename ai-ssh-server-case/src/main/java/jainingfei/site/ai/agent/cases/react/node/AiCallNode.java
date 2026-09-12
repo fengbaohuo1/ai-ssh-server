@@ -146,7 +146,7 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         AiAgentRegisterVO registerVO = defaultArmoryFactory.getAiAgentRegisterVO(ctx.getAgentId());
         try {
             if (registerVO.getModelBaseUrl() != null && registerVO.getChatModelName() != null) {
-                intentService.configure(
+                intentService.configure(registerVO.getModelProvider(),
                         registerVO.getModelBaseUrl(), registerVO.getModelApiKey(), registerVO.getChatModelName());
             }
             IntentResultVO intentResult = intentService.classify(

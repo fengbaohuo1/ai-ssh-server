@@ -12,10 +12,10 @@ import com.google.genai.types.Content;
 import com.google.genai.types.Part;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.SpringAiLlmAdapter;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelFactory;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ModelTuning;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ChatModelFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ModelTuning;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderProfile;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
@@ -69,12 +69,12 @@ public class PlannerAgentBuilder {
                        List<String> allowedAgents) {
         String allowed = String.join(",", allowedAgents);
         // 规划器模型：同一通道、同一份配置，不额外加压（推理强度取服务端默认）
-        ChatModel plannerModel = chatModelFactory.create(modelConfig, ModelTuning.deterministic(null));
+        ProviderProfile plannerProfile = chatModelFactory.create(modelConfig, ModelTuning.deterministic(null));
 
         BaseAgent planner = LlmAgent.builder()
                 .name("DynamicTaskPlanner")
                 .description("多 Agent 任务规划器：把用户任务拆成带依赖关系的子任务计划")
-                .model(new SpringAiLlmAdapter(plannerModel))
+                .model(new SpringAiLlmAdapter(plannerProfile))
                 .instruction(INSTRUCTION + "\n允许Agent:" + allowed)
                 .build();
 

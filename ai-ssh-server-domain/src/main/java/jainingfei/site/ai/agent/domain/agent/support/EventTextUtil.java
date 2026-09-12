@@ -14,7 +14,7 @@ import java.util.Optional;
 /**
  * ADK 事件 → 展示/落库内容提取工具（V3 托管循环的事件中继规则）。
  *
- * <p>FixedSpringAI 采用 partial/聚合语义后，一次 LLM 调用的文本先以 partial=true 分片事件
+ * <p>ADK 适配器采用 partial/聚合语义后，一次 LLM 调用的文本先以 partial=true 分片事件
  * 流式到达，最后跟一条 partial 为空的聚合事件（携带全文 + 草稿标记 + FunctionCall parts）。
  * 会话/SSE 消费方若直接拼接事件文本会把整段回答重复一遍，因此统一用本类提取"可见文本增量"：
  * <ul>

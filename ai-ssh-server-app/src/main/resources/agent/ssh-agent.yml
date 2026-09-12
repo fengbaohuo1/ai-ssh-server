@@ -11,14 +11,17 @@ ai:
             agent-desc: SSH 智能运维助手，可执行远程命令并智能分析结果
           module:
             chat-model:
-              # 通道 = OpenAI 协议（spring-ai-openai）：换厂商只改 base-url / model / api-key，代码不动
-              # 例：https://api.deepseek.com · https://api.moonshot.cn/v1 · http://127.0.0.1:8000/v1
+              # 模型通道（provider）：决定"用哪条道说话"，可选值
+              #   deepseek-native   DeepSeek 原生 SDK：流式也有思考草稿 + 原生缓存命中明细
+              #   openai-compatible OpenAI 协议：换厂商只改 base-url / model / api-key，代码不动
+              #                     （例：https://api.moonshot.cn/v1 · http://127.0.0.1:8000/v1）
+              provider: deepseek-native
               base-url: https://api.deepseek.com
               api-key: sk-REDACTED
               model: deepseek-flash
               # 模型上下文窗口（tokens），供前端配置信息展示；与会话治理压缩阈值（compact.token-threshold）相互独立
               context-size: 128000
-              # 推理强度：minimal、low、medium、high（仅推理模型生效；非推理模型无需配置，避免未知参数风险）
+              # 推理强度：deepseek-native 通道取值 high / max；openai-compatible 通道原样透传（minimal/low/medium/high…）
               reasoning-effort: High
 #              tool-skills-list:
 #                 - type: resource

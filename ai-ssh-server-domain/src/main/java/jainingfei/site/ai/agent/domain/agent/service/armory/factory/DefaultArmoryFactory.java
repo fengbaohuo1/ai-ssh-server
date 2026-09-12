@@ -8,10 +8,10 @@ import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ArmoryCommandEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderProfile;
 import jainingfei.site.ai.agent.domain.agent.service.armory.node.RootNode;
 import lombok.*;
 import org.apache.commons.lang3.ObjectUtils;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 
@@ -41,9 +41,9 @@ public class DefaultArmoryFactory {
     @EqualsAndHashCode(callSuper = true)
     public static class DynamicContext extends jianingfei.site.wrench.design.framework.tree.DynamicContext {
         /**
-         * 大模型（由 ChatModelNode 经 ChatModelFactory 装配，OpenAI 兼容通道）
+         * 模型通道档案（由 ChatModelNode 经 ChatModelFactory 装配：provider 选通道，档案带模型与能力）
          */
-        private ChatModel chatModel;
+        private ProviderProfile providerProfile;
         /**
          * 智能体配置组
          */

@@ -22,7 +22,7 @@ import java.util.Optional;
  * 会话历史回顾回放器（P0 冷启动一致性）——重启后把 DB 里的对话以"user 角色回顾文本"
  * 注入重建的空 ADK 会话，让模型第一回合就能看到上一轮说过什么、跑过什么命令。
  *
- * <p>为什么是"user 回顾文本"而不是逐条全真事件回放（约束见 FixedSpringAI）：
+ * <p>为什么是"user 回顾文本"而不是逐条全真事件回放（约束见 SpringAiLlmAdapter / ReasoningDraftProtocol）：
  * <ul>
  *   <li>无草稿标记的纯文本 assistant 事件在历史重建时被整条跳过（思考模型防 400）——
  *       直接回放 DB 的可见文本 assistant 行会被滤掉；</li>

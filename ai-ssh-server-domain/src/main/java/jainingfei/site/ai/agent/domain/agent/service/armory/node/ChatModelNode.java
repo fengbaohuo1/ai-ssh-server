@@ -9,7 +9,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySupport;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.mcp.client.factory.McpCreateFactory;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ChatModelFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.skills.ToolSkillsCreateService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
@@ -24,7 +24,8 @@ import java.util.List;
  * Spring AI 只负责通信，ADK 负责工具循环 + 编排。
  * <p>
  * <b>厂商边界</b>：本节点不出现任何厂商类型，模型一律经 {@link ChatModelFactory} 取得
- * {@link ChatModelBundle}（主链路 = thinking 跟随默认 + yml reasoning-effort）。
+ * {@link jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderProfile}
+ * （通道由 yml 的 chat-model.provider 决定，主链路 reasoning-effort 取配置）。
  */
 @Slf4j
 @Service
@@ -67,11 +68,11 @@ public class ChatModelNode extends AbstractArmorySupport {
             log.info("Skills → BaseToolset");
         }
 
-        // 3. ChatModel：唯一入口 ChatModelFactory（OpenAI 兼容通道，代码里不出现厂商类型）
-        dynamicContext.setChatModel(chatModelFactory.createMain(chatModelConfig));
+        // 3. 模型通道：唯一入口 ChatModelFactory（provider 选通道；本节点与下游均不出现厂商类型）
+        dynamicContext.setProviderProfile(chatModelFactory.createMain(chatModelConfig));
 
-        log.info("ChatModelNode 装配完成（model:{}, reasoningEffort:{}, streamUsage:true）, mcpToolsets:{}",
-                chatModelConfig.getModel(), chatModelConfig.getReasoningEffort(),
+        log.info("ChatModelNode 装配完成（provider:{}, model:{}, reasoningEffort:{}）, mcpToolsets:{}",
+                chatModelConfig.getProvider(), chatModelConfig.getModel(), chatModelConfig.getReasoningEffort(),
                 dynamicContext.getMcpToolsets().size());
         return router(requestParameter, dynamicContext);
     }

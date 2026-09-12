@@ -18,6 +18,11 @@
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-openai</artifactId>
         </dependency>
+        <!-- DeepSeek 原生通道（provider=deepseek-native）：流式思考草稿 + 原生缓存命中明细 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-deepseek</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-mcp</artifactId>

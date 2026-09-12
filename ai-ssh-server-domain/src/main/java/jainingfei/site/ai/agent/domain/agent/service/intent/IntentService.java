@@ -39,7 +39,7 @@ import java.util.Map;
  * <p>整体流转示意图：
  * <pre>
  *   AiCallNode.doApply
- *      │  configure(baseUrl, apiKey, modelName)   ← 复用 Agent 配置，不单独建模型
+ *      │  configure(provider, baseUrl, apiKey, modelName)   ← 复用 Agent 配置，不单独建模型
  *      │  classify(sessionId, userId, msg)
  *      │  syncTaskStateAfterClassification(...)   ← 回合入口同步任务态（V3.2）
  *      ▼
@@ -402,13 +402,14 @@ public class IntentService implements IIntentService {
      * 必须在首次调用 {@link #classify} 之前执行，否则 LLM 分类器将降级为 UNKNOWN。
      * 通常由外部装配链路（如 AiCallNode）调用。
      *
+     * @param provider  模型通道 id（与 Agent 装配链路同一通道；空 = 默认通道）
      * @param baseUrl   Agent 装配链路中的 API baseUrl
      * @param apiKey    Agent 装配链路中的 API key
      * @param modelName Agent 配置的模型名
      */
     @Override
-    public void configure(String baseUrl, String apiKey, String modelName) {
-        llmClassifier.configure(baseUrl, apiKey, modelName);
+    public void configure(String provider, String baseUrl, String apiKey, String modelName) {
+        llmClassifier.configure(provider, baseUrl, apiKey, modelName);
     }
 
     /**

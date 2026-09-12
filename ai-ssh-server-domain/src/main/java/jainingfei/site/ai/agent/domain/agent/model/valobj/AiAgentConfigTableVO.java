@@ -63,6 +63,13 @@ public class AiAgentConfigTableVO {
         @Data
         public static class ChatModel {
 
+            /**
+             * 模型通道 id：deepseek-native（DeepSeek 原生 SDK）/ openai-compatible（OpenAI 协议）。
+             * <p>空 = 默认通道（openai-compatible）；未知取值在装配期直接报错（列出可选值），
+             * 不静默退回默认通道。
+             */
+            private String provider;
+
             private String baseUrl;
             private String apiKey;
             private String model;
@@ -75,7 +82,8 @@ public class AiAgentConfigTableVO {
             private Long contextSize;
 
             /**
-             * 推理强度：minimal、low、medium、high（仅推理模型生效，非推理模型忽略；对齐教程 2-9）
+             * 推理强度：deepseek-native 通道为 high / max；openai-compatible 通道原样透传给服务端
+             * （minimal、low、medium、high…，仅推理模型生效；对齐教程 2-9）
              */
             private String reasoningEffort;
 

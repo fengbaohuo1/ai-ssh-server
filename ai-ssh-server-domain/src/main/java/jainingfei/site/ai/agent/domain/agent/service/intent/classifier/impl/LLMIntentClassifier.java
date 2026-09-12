@@ -6,8 +6,8 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.ConversationContextVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelFactory;
-import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ModelTuning;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ChatModelFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ModelTuning;
 import jainingfei.site.ai.agent.domain.agent.service.intent.classifier.IIntentClassifier;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
@@ -22,8 +22,8 @@ import java.util.stream.Collectors;
  * <p>
  * 当规则分类器置信度不足时，调用独立 LLM（temperature=0.1）进行意图分类。
  * <p>
- * 复用智能体装配链路中 Agent 自己的 API 配置（baseUrl + apiKey + 模型名），由
- * {@code IntentService} 在分类前通过 {@link #configure(String, String, String)} 注入。
+ * 复用智能体装配链路中 Agent 自己的 API 配置（通道 + baseUrl + apiKey + 模型名），由
+ * {@code IntentService} 在分类前通过 {@link #configure(String, String, String, String)} 注入。
  * 构建的 ChatModel 独立于 Agent 的主 ChatModel：无工具回调、temperature=0.1，
  * 保证意图识别的确定性与隔离性。
  *
@@ -56,11 +56,12 @@ import java.util.stream.Collectors;
 public class LLMIntentClassifier implements IIntentClassifier {
 
     private volatile ChatModel chatModel;
+    private volatile String providerId;
     private volatile String baseUrl;
     private volatile String apiKey;
     private volatile String modelName;
 
-    /** 模型统一入口（厂商差异只存在于 bundle 实现内，本类不出现厂商类型） */
+    /** 模型统一入口（通道差异只存在于档案实现内，本类不出现厂商类型） */
     @Resource
     private ChatModelFactory chatModelFactory;
 
@@ -75,42 +76,49 @@ public class LLMIntentClassifier implements IIntentClassifier {
      * <p>
      * 案例：
      * <pre>
-     *   第1次调用 configure(baseUrl, key, "gpt-4")
-     *   -> 创建 ChatModel，model="gpt-4", temperature=0.1
+     *   第1次调用 configure("deepseek-native", baseUrl, key, "deepseek-v4-flash")
+     *   -> 创建 ChatModel，model="deepseek-v4-flash", temperature=0.1
      *
-     *   第2次调用 configure(baseUrl, key, "gpt-4")  // 配置相同
+     *   第2次调用 configure(同上)  // 配置相同
      *   -> 不重建，复用已有 ChatModel
      *
-     *   第3次调用 configure(baseUrl, key, "claude-3")  // 模型变化
-     *   -> 重建 ChatModel，model="claude-3", temperature=0.1
+     *   第3次调用 configure("openai-compatible", baseUrl, key, "gpt-4")  // 通道或模型变化
+     *   -> 重建 ChatModel
      * </pre>
      *
+     * @param provider  模型通道 id（与 Agent 装配链路同一通道；空 = 默认通道）
      * @param baseUrl   Agent 装配链路中的 API baseUrl
      * @param apiKey    Agent 装配链路中的 API key
      * @param modelName Agent 配置的模型名
      */
-    public synchronized void configure(String baseUrl, String apiKey, String modelName) {
+    public synchronized void configure(String provider, String baseUrl, String apiKey, String modelName) {
         if (baseUrl == null || apiKey == null || modelName == null || modelName.isBlank()) {
             return;
         }
+        String normalizedProvider = provider == null || provider.isBlank() ? "" : provider.trim();
         // 配置未变则不重建
         if (baseUrl.equals(this.baseUrl) && apiKey.equals(this.apiKey)
-                && modelName.equals(this.modelName) && this.chatModel != null) {
+                && modelName.equals(this.modelName) && normalizedProvider.equals(
+                        this.providerId == null ? "" : this.providerId)
+                && this.chatModel != null) {
             return;
         }
+        this.providerId = normalizedProvider;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
         this.modelName = modelName;
 
-        // 复用 Agent 的三段配置建独立模型：无工具回调、temperature=0.1（确定性）
+        // 复用 Agent 的配置建独立模型：无工具回调、temperature=0.1（确定性）
         AiAgentConfigTableVO.Module.ChatModel modelConfig = new AiAgentConfigTableVO.Module.ChatModel();
+        modelConfig.setProvider(normalizedProvider);
         modelConfig.setBaseUrl(baseUrl);
         modelConfig.setApiKey(apiKey);
         modelConfig.setModel(modelName);
         this.chatModel = chatModelFactory.create(modelConfig, ModelTuning.builder()
                 .temperature(0.1)
-                .build());
-        log.info("意图识别模型已装配 | model:{} | temperature:0.1", modelName);
+                .build())
+                .chatModel();
+        log.info("意图识别模型已装配 | provider:{} | model:{} | temperature:0.1", normalizedProvider, modelName);
     }
 
     private static final String CLASSIFY_PROMPT_TEMPLATE = """

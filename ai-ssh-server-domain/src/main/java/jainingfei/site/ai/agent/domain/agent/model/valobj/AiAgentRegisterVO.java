@@ -34,6 +34,11 @@ public class AiAgentRegisterVO {
     private Runner runner;
 
     /**
+     * 模型通道 id（意图识别 LLM 分类器复用：与主链路同一通道）
+     */
+    private String modelProvider;
+
+    /**
      * 模型 API baseUrl（意图识别 LLM 分类器复用，2-7 节新增）
      */
     private String modelBaseUrl;

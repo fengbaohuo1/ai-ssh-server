@@ -5,6 +5,7 @@ import com.google.adk.models.BaseLlmConnection;
 import com.google.adk.models.LlmRequest;
 import com.google.adk.models.LlmResponse;
 import io.reactivex.rxjava3.core.Flowable;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderProfile;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -23,8 +24,8 @@ import org.springframework.ai.chat.prompt.Prompt;
  *   排障    LlmErrorDiagnostics        失败时的服务端响应体与请求形状
  * </pre>
  *
- * <p>能力的通道差异（推理内容读法、缓存命中读法）通过 {@link ReasoningDraftAccess} /
- * {@link CacheMetricsAccess} 注入；未注入时走 Spring AI 的通用约定（元数据键 / 通用 usage 字段）。
+ * <p>能力的通道差异（推理内容载体、缓存命中读法）由 {@link ProviderProfile} 注入；
+ * 只有裸 {@link ChatModel} 时走 Spring AI 的通用约定（元数据键 / 通用 usage 字段）。
  *
  * <p>线程模型：无状态，可被多个智能体（父/子）共享；每次调用的中间状态都封装在聚合器的方法栈里。
  */
@@ -38,23 +39,29 @@ public class SpringAiLlmAdapter extends BaseLlm {
     private final SpringAiResponseAggregator responseAggregator;
     private final LlmErrorDiagnostics diagnostics = new LlmErrorDiagnostics();
 
+    /** 通道档案：模型 + 两项私有能力一次带入（装配链路的正常入口） */
+    public SpringAiLlmAdapter(ProviderProfile profile) {
+        this(profile.chatModel(), profile.reasoningDraft(), profile.cacheMetrics());
+    }
+
+    /** 裸模型（无通道能力声明）：走通用约定，供测试与单通道场景使用 */
     public SpringAiLlmAdapter(ChatModel chatModel) {
         this(chatModel, null, null);
     }
 
     /**
      * @param chatModel     Spring AI 模型（通信层）
-     * @param draftAccess   通道的推理内容读法（null = 走元数据键默认约定）
+     * @param draftAccess   通道的推理内容载体（null = 走元数据键默认约定）
      * @param cacheMetrics  通道的缓存命中读法（null = 只读通用 usage 字段）
      */
-    public SpringAiLlmAdapter(ChatModel chatModel,
-                              ReasoningDraftAccess draftAccess,
-                              CacheMetricsAccess cacheMetrics) {
+    private SpringAiLlmAdapter(ChatModel chatModel,
+                               ReasoningDraftAccess draftAccess,
+                               CacheMetricsAccess cacheMetrics) {
         super(extractModelName(chatModel));
         this.chatModel = chatModel;
         this.streamingChatModel = chatModel instanceof StreamingChatModel ? (StreamingChatModel) chatModel : null;
         this.draftProtocol = new ReasoningDraftProtocol();
-        this.promptAssembler = new SpringAiPromptAssembler(chatModel, draftProtocol);
+        this.promptAssembler = new SpringAiPromptAssembler(chatModel, draftProtocol, draftAccess);
         this.responseAggregator = new SpringAiResponseAggregator(
                 draftProtocol, new UsageReporter(), draftAccess, cacheMetrics);
     }

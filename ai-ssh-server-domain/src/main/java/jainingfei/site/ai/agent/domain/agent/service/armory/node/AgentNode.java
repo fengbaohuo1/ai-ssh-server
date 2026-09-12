@@ -12,6 +12,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySupport;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.SpringAiLlmAdapter;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderProfile;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.BatchSubAgentDispatchTool;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.DynamicAgentOrchestrator;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.DynamicPlanDispatchTool;
@@ -23,7 +24,6 @@ import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SubAgen
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SubAgentDispatchTool;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.toolset.StaticToolset;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -80,7 +80,7 @@ public class AgentNode extends AbstractArmorySupport {
 
         AiAgentConfigTableVO aiAgentConfigTableVO = requestParameter.getAiAgentConfigTableVO();
         List<AiAgentConfigTableVO.Module.Agent> agents = aiAgentConfigTableVO.getModule().getAgents();
-        ChatModel chatModel = dynamicContext.getChatModel();
+        ProviderProfile providerProfile = dynamicContext.getProviderProfile();
 
         // MCP/技能工具集（ChatModelNode 装配）：不再向共享列表里塞 SSH 工具，
         // 保证父智能体重建时可以只拿到"非执行类"工具
@@ -91,25 +91,25 @@ public class AgentNode extends AbstractArmorySupport {
         // 第一段：全员装配
         for (AiAgentConfigTableVO.Module.Agent agentConfig : agents) {
             dynamicContext.getAgentGroup().put(agentConfig.getName(),
-                    buildAgent(agentConfig, chatModel, sshCapableToolsets));
+                    buildAgent(agentConfig, providerProfile, sshCapableToolsets));
         }
 
         // 第二段：为声明了 sub-agents 的智能体换上派发工具集
-        buildAgentTools(dynamicContext, agents, chatModel, mcpOnlyToolsets,
+        buildAgentTools(dynamicContext, agents, providerProfile, mcpOnlyToolsets,
                 aiAgentConfigTableVO.getModule().getChatModel());
 
         return router(requestParameter, dynamicContext);
     }
 
-    /** 按配置构建 LlmAgent（V3 托管循环：FixedSpringAI 输出原生 FunctionCall part，Runner 内部循环推进） */
+    /** 按配置构建 LlmAgent（V3 托管循环：适配器输出原生 FunctionCall part，Runner 内部循环推进） */
     private LlmAgent buildAgent(AiAgentConfigTableVO.Module.Agent agentConfig,
-                                ChatModel chatModel,
+                                ProviderProfile providerProfile,
                                 List<?> tools) {
         return LlmAgent.builder()
                 .name(agentConfig.getName())
                 .instruction(agentConfig.getInstruction())
                 .description(agentConfig.getDescription())
-                .model(new SpringAiLlmAdapter(chatModel))
+                .model(new SpringAiLlmAdapter(providerProfile))
                 .outputKey(agentConfig.getOutputKey())
                 .tools(tools)
                 .build();
@@ -122,7 +122,7 @@ public class AgentNode extends AbstractArmorySupport {
      */
     private void buildAgentTools(DefaultArmoryFactory.DynamicContext dynamicContext,
                                  List<AiAgentConfigTableVO.Module.Agent> agents,
-                                 ChatModel chatModel,
+                                 ProviderProfile providerProfile,
                                  List<BaseToolset> mcpOnlyToolsets,
                                  AiAgentConfigTableVO.Module.ChatModel chatModelConfig) {
         for (AiAgentConfigTableVO.Module.Agent agentConfig : agents) {
@@ -151,7 +151,7 @@ public class AgentNode extends AbstractArmorySupport {
             tools.addAll(mcpOnlyToolsets);
 
             dynamicContext.getAgentGroup().put(agentConfig.getName(),
-                    buildAgent(agentConfig, chatModel, tools));
+                    buildAgent(agentConfig, providerProfile, tools));
 
             log.info("子Agent装配完成 | parent:{} | subAgents:[{}] | tools:[{}] | 父智能体不再持有 executeCommand",
                     agentConfig.getName(), String.join(",", subAgentNames),

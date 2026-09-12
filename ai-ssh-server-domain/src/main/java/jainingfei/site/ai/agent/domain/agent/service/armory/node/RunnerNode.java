@@ -50,7 +50,7 @@ public class RunnerNode extends AbstractArmorySupport {
         agentCatalog.register(appName, dynamicContext.getAgentGroup());
 
         // 模型配置透传到 AiAgentRegisterVO——供意图识别 LLM 分类器复用
-        // （模型通道由 ChatModelFactory 统一装配，这里只透传三段配置）
+        // （模型通道由 ChatModelFactory 统一装配，这里只透传通道 + 三段配置）
         AiAgentConfigTableVO.Module.ChatModel chatModelConfig = aiAgentConfigTableVO.getModule().getChatModel();
 
         AiAgentRegisterVO aiAgentRegisterVO = AiAgentRegisterVO.builder()
@@ -59,6 +59,7 @@ public class RunnerNode extends AbstractArmorySupport {
                 .agentName(agentName)
                 .agentDesc(agentDesc)
                 .runner(runner)
+                .modelProvider(chatModelConfig != null ? chatModelConfig.getProvider() : null)
                 .modelBaseUrl(chatModelConfig != null ? chatModelConfig.getBaseUrl() : null)
                 .modelApiKey(chatModelConfig != null ? chatModelConfig.getApiKey() : null)
                 .chatModelName(chatModelConfig != null ? chatModelConfig.getModel() : null)
