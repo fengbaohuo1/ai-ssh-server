@@ -1,4 +1,5 @@
 package jainingfei.site.ai.agent.domain.agent.service.chat;
+import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 
 import com.google.adk.agents.RunConfig;
 import com.google.adk.events.Event;
@@ -203,7 +204,7 @@ public class ChatService implements IChatService {
         String serverContext = "";
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
             log.info("设置 SSH 连接 ID: {}", terminalSessionId);
-            SshExecuteAdkTool.bindSession(effectiveSessionId, terminalSessionId);
+            SshSessionBindings.bindSession(effectiveSessionId, terminalSessionId);
             // 查询服务器信息，注入到 LLM 上下文，让它知道连了哪台机器
             try {
                 SshConnectionAggregate aggregate = sshConnectionService.queryConnectionDetail(terminalSessionId);

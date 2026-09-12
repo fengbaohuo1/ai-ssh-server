@@ -11,6 +11,7 @@ import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
+import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -70,13 +71,13 @@ public class RootNode extends AbstractAIAgentReActSupport {
 
         // 3. 绑定终端会话（工具执行靠 SshExecuteAdkTool 静态映射；会话级映射支持跨请求回退）
         if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
-            SshExecuteAdkTool.bindSession(sessionId, terminalSessionId);
+            SshSessionBindings.bindSession(sessionId, terminalSessionId);
             bindTerminalSession(sessionId, terminalSessionId);
             setCurrentTerminalSession(terminalSessionId);
         } else {
             String bound = getTerminalSession(sessionId);
             if (bound != null) {
-                SshExecuteAdkTool.bindSession(sessionId, bound);
+                SshSessionBindings.bindSession(sessionId, bound);
                 setCurrentTerminalSession(bound);
                 terminalSessionId = bound;
             }

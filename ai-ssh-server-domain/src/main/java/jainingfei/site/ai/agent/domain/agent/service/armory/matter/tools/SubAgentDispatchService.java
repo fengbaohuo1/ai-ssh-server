@@ -1,4 +1,5 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
+import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.RunConfig;
@@ -154,7 +155,7 @@ public class SubAgentDispatchService {
     private void createSubSession(Runner runner, String appName, String sessionId, String terminalSessionId) {
         ConcurrentHashMap<String, Object> initialState = new ConcurrentHashMap<>();
         if (terminalSessionId != null && !terminalSessionId.isBlank()) {
-            initialState.put(SshExecuteAdkTool.STATE_KEY_TERMINAL_SESSION, terminalSessionId);
+            initialState.put(SshSessionBindings.STATE_KEY_TERMINAL_SESSION, terminalSessionId);
         }
         runner.sessionService()
                 .createSession(appName, SUBAGENT_USER_ID, initialState, sessionId)

@@ -9,6 +9,7 @@ import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
+import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -104,7 +105,7 @@ public class UserFeedbackNode extends AbstractAIAgentReActSupport {
         try {
             String sessionId = ctx.getSessionId();
             if (sessionId != null) {
-                SshExecuteAdkTool.unbindSession(sessionId);
+                SshSessionBindings.unbindSession(sessionId);
                 unbindTerminalSession(sessionId);
                 // 清理工具结果摘要等会话级上下文缓存，避免旧结果污染下一回合
                 chatContextService.clearSessionContext(sessionId);

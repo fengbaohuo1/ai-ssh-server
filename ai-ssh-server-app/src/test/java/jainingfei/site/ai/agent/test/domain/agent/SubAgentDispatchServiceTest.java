@@ -1,4 +1,5 @@
 package jainingfei.site.ai.agent.test.domain.agent;
+import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.apps.App;
@@ -99,7 +100,7 @@ public class SubAgentDispatchServiceTest {
         String sessionId = agent.lastSessionId();
         assertTrue(sessionId.startsWith("subagent-"), sessionId);
         // 终端会话透传：子会话初始 state 带上父会话绑定的 connectionId
-        assertEquals("conn-1", agent.stateOf(sessionId).get(SshExecuteAdkTool.STATE_KEY_TERMINAL_SESSION));
+        assertEquals("conn-1", agent.stateOf(sessionId).get(SshSessionBindings.STATE_KEY_TERMINAL_SESSION));
         // 子会话跑完回收（内存会话服务不会无界增长）
         assertNull(sessionService.getSession("sshDiagnosisAgent", "subagent-user", sessionId, Optional.empty())
                 .blockingGet());
@@ -187,7 +188,7 @@ public class SubAgentDispatchServiceTest {
         service.execute(context(null), task);
 
         assertEquals(TaskStatus.COMPLETED, task.getStatus());
-        assertNull(agent.stateOf(agent.lastSessionId()).get(SshExecuteAdkTool.STATE_KEY_TERMINAL_SESSION),
+        assertNull(agent.stateOf(agent.lastSessionId()).get(SshSessionBindings.STATE_KEY_TERMINAL_SESSION),
                 "未绑定终端会话时不应写入该 state 键");
     }
 }

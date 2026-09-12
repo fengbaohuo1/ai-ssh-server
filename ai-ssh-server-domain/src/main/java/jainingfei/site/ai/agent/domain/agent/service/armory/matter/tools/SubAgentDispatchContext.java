@@ -1,4 +1,5 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
+import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 
 import com.google.adk.tools.ToolContext;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.AgentExecutionContext;
@@ -12,7 +13,7 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.AgentExecution
  *   appName            toolContext.invocationContext().appName()  配置表 app-name → AgentCatalog 精确查找
  *   agentName          toolContext.agentName()                    父智能体名（日志/追溯）
  *   parentSessionId    toolContext.invocationId()                  父会话 invocationId（仅追溯）
- *   terminalSessionId  SshExecuteAdkTool.resolveTerminalSession()  父会话绑定的 SSH 连接（透传给子会话 state）
+ *   terminalSessionId  SshSessionBindings.resolveTerminalSession()  父会话绑定的 SSH 连接（透传给子会话 state）
  * </pre>
  *
  * <p>toolContext 允许为 null（工具被直接调用、未经过完整 Runner 会话时），此时退化为 unknown，
@@ -30,7 +31,7 @@ final class SubAgentDispatchContext {
                 .appName(toolContext != null ? toolContext.invocationContext().appName() : "unknown")
                 .agentName(toolContext != null ? toolContext.agentName() : "unknown")
                 .parentSessionId(toolContext != null ? toolContext.invocationId() : "unknown")
-                .terminalSessionId(SshExecuteAdkTool.resolveTerminalSession(toolContext))
+                .terminalSessionId(SshSessionBindings.resolveTerminalSession(toolContext))
                 .build();
     }
 }
