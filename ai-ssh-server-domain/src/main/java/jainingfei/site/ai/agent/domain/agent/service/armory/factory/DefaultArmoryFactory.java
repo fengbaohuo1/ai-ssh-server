@@ -8,6 +8,7 @@ import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ArmoryCommandEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelBundle;
 import jainingfei.site.ai.agent.domain.agent.service.armory.node.RootNode;
 import lombok.*;
 import org.apache.commons.lang3.ObjectUtils;
@@ -44,6 +45,11 @@ public class DefaultArmoryFactory {
          * 大模型
          */
         private ChatModel chatModel;
+        /**
+         * 模型包（厂商差异承载者）——ADK 适配器（FixedSpringAI）与派发/编排链路只依赖它，
+         * 由 ChatModelNode 经 ChatModelFactory 装配
+         */
+        private ChatModelBundle chatModelBundle;
         /**
          * 智能体配置组
          */

@@ -13,7 +13,6 @@ import jainingfei.site.ai.agent.domain.agent.service.armory.matter.adk.FixedSpri
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.toolset.StaticToolset;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -31,7 +30,6 @@ public class AgentNode extends AbstractArmorySupport {
     protected AiAgentRegisterVO doApply(ArmoryCommandEntity requestParameter, DefaultArmoryFactory.DynamicContext dynamicContext) throws Exception {
         log.info("Ai Agent 装配操作 - AgentNode");
 
-        ChatModel chatModel = dynamicContext.getChatModel();
         List<BaseToolset> mcpToolsets = dynamicContext.getMcpToolsets();
         AiAgentConfigTableVO aiAgentConfigTableVO = requestParameter.getAiAgentConfigTableVO();
         List<AiAgentConfigTableVO.Module.Agent> agents = aiAgentConfigTableVO.getModule().getAgents();
@@ -46,7 +44,8 @@ public class AgentNode extends AbstractArmorySupport {
                     .description(agentConfig.getDescription())
                     // V3 托管循环：FixedSpringAI 输出原生 FunctionCall part，ADK Runner 内部循环
                     // 自动执行工具并推进到最终回复（finalResponse）；循环熔断走 RunConfig.maxLlmCalls
-                    .model(new FixedSpringAI(chatModel))
+                    // 厂商差异由 ChatModelBundle（ChatModelNode 装配）承载，本节点只做 ADK 侧编排
+                    .model(new FixedSpringAI(dynamicContext.getChatModelBundle()))
                     .outputKey(agentConfig.getOutputKey())
                     .tools(mcpToolsets)
                     .build();

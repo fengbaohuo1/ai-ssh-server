@@ -1,14 +1,16 @@
 package jainingfei.site.ai.agent.domain.agent.service.intent.classifier.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.Resource;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.ConversationContextVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ModelTuning;
 import jainingfei.site.ai.agent.domain.agent.service.intent.classifier.IIntentClassifier;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -58,14 +60,18 @@ public class LLMIntentClassifier implements IIntentClassifier {
     private volatile String apiKey;
     private volatile String modelName;
 
+    /** 模型统一入口（厂商差异只存在于 bundle 实现内，本类不出现厂商类型） */
+    @Resource
+    private ChatModelFactory chatModelFactory;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * 由 IntentService 在分类前注入 Agent 的 API 配置。
      * 仅在配置变化时重建 ChatModel，避免每次分类都构建。
      * <p>
-     * 注意：spring-ai 2.x 已移除 OpenAiApi 类，改用 OpenAiChatOptions 直建
-     * （与 ChatModelNode 的装配方式一致）。
+     * 模型经统一入口 {@link ChatModelFactory} 创建（与主链路同一通道、同一份配置），
+     * 只额外设置 temperature=0.1 保证分类结果稳定；本类不出现任何厂商类型。
      * <p>
      * 案例：
      * <pre>
@@ -95,13 +101,16 @@ public class LLMIntentClassifier implements IIntentClassifier {
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
         this.modelName = modelName;
-        OpenAiChatOptions chatOptions = OpenAiChatOptions.builder()
-                .baseUrl(baseUrl)
-                .apiKey(apiKey)
-                .model(modelName)
-                .temperature(0.1) // 意图识别需要更确定的结果
-                .build();
-        this.chatModel = OpenAiChatModel.builder().options(chatOptions).build();
+
+        // 复用 Agent 的三段配置建独立模型：无工具回调、temperature=0.1（确定性）
+        AiAgentConfigTableVO.Module.ChatModel modelConfig = new AiAgentConfigTableVO.Module.ChatModel();
+        modelConfig.setBaseUrl(baseUrl);
+        modelConfig.setApiKey(apiKey);
+        modelConfig.setModel(modelName);
+        this.chatModel = chatModelFactory.create(modelConfig, ModelTuning.builder()
+                .temperature(0.1)
+                .build()).chatModel();
+        log.info("意图识别模型已装配 | model:{} | temperature:0.1", modelName);
     }
 
     private static final String CLASSIFY_PROMPT_TEMPLATE = """

@@ -9,23 +9,14 @@ import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySupport;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.mcp.client.factory.McpCreateFactory;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelBundle;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.skills.ToolSkillsCreateService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
-import org.apache.commons.lang3.StringUtils;
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.prompt.ChatOptions;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.deepseek.DeepSeekChatModel;
-import org.springframework.ai.deepseek.DeepSeekChatOptions;
-import org.springframework.ai.deepseek.api.DeepSeekApi;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
 
 import java.util.List;
-import java.util.Locale;
 
 /**
  * 大模型 + 工具装配节点。
@@ -33,8 +24,8 @@ import java.util.Locale;
  * <b>架构</b>：MCP 三类工厂（remote/stdio/local）产出 {@link BaseToolset} → ADK。
  * Spring AI 只负责通信，ADK 负责工具循环 + 编排。
  * <p>
- * V2.2: 主模型切换到 spring-ai-deepseek 2.0.1 原生供应商（DeepSeek thinking 模式官方支持，
- * reasoning_content 捕获/回传走 DeepSeekAssistantMessage，替代 OpenAI 兼容层）。
+ * <b>厂商边界</b>：本节点不出现任何厂商类型，模型一律经 {@link ChatModelFactory} 取得
+ * {@link ChatModelBundle}（主链路 = thinking 跟随默认 + yml reasoning-effort）。
  */
 @Slf4j
 @Service
@@ -43,6 +34,7 @@ public class ChatModelNode extends AbstractArmorySupport {
     @Resource private AgentNode agentNode;
     @Resource private McpCreateFactory mcpCreateFactory;
     @Resource private ToolSkillsCreateService toolSkillsCreateService;
+    @Resource private ChatModelFactory chatModelFactory;
 
     @Override
     protected AiAgentRegisterVO doApply(ArmoryCommandEntity requestParameter, DefaultArmoryFactory.DynamicContext dynamicContext) throws Exception {
@@ -76,27 +68,13 @@ public class ChatModelNode extends AbstractArmorySupport {
             log.info("Skills → BaseToolset");
         }
 
-        // 3. ChatModel（DeepSeek 原生供应商：thinking 默认开启，reasoning_content 官方捕获/回传）
-        DeepSeekApi deepSeekApi = DeepSeekApi.builder()
-                .baseUrl(chatModelConfig.getBaseUrl())
-                .apiKey(chatModelConfig.getApiKey())
-                .build();
-        DeepSeekChatOptions.Builder optionsBuilder = DeepSeekChatOptions.builder()
-                .model(resolveChatModel(chatModelConfig.getModel()));
+        // 3. ChatModel：唯一入口 ChatModelFactory（厂商类型只存在于 bundle 实现内部）
+        ChatModelBundle chatModelBundle = chatModelFactory.createMain(chatModelConfig);
+        dynamicContext.setChatModelBundle(chatModelBundle);
+        dynamicContext.setChatModel(chatModelBundle.chatModel());
 
-        // 推理强度（仅推理模型生效；deepseek 枚举仅 HIGH/MAX，可配置时按需映射）
-        String reasoningEffort = chatModelConfig.getReasoningEffort();
-        if (StringUtils.isNotBlank(reasoningEffort)) {
-            resolveReasoningEffort(reasoningEffort).ifPresent(optionsBuilder::reasoningEffort);
-        }
-
-        dynamicContext.setChatModel(new DeepSeekChatModelFix(
-                DeepSeekChatModel.builder()
-                        .deepSeekApi(deepSeekApi)
-                        .options(optionsBuilder.build())
-                        .build()));
-
-        log.info("ChatModelNode 装配完成（DeepSeek 原生通道，thinking 开启）, mcpToolsets:{}",
+        log.info("ChatModelNode 装配完成（provider:{}, model:{}, reasoningEffort:{}）, mcpToolsets:{}",
+                chatModelBundle.providerName(), chatModelConfig.getModel(), chatModelConfig.getReasoningEffort(),
                 dynamicContext.getMcpToolsets().size());
         return router(requestParameter, dynamicContext);
     }
@@ -104,58 +82,5 @@ public class ChatModelNode extends AbstractArmorySupport {
     @Override
     public StrategyHandler<ArmoryCommandEntity, DefaultArmoryFactory.DynamicContext, AiAgentRegisterVO> get(ArmoryCommandEntity requestParameter, DefaultArmoryFactory.DynamicContext dynamicContext) throws Exception {
         return agentNode;
-    }
-
-    /** yml 模型名 → DeepSeek 枚举（deepseek-v4-flash → DEEPSEEK_V4_FLASH），未知名回退默认并告警 */
-    private static DeepSeekApi.ChatModel resolveChatModel(String model) {
-        if (StringUtils.isNotBlank(model)) {
-            try {
-                return DeepSeekApi.ChatModel.valueOf(model.trim().toUpperCase(Locale.ROOT).replace('-', '_'));
-            } catch (IllegalArgumentException e) {
-                log.warn("未知 DeepSeek 模型名 [{}]，回退默认模型", model);
-            }
-        }
-        return DeepSeekApi.ChatModel.DEEPSEEK_V4_FLASH;
-    }
-
-    /** 推理强度字符串 → DeepSeek 枚举（当前仅 HIGH/MAX），不识别时忽略 */
-    private static java.util.Optional<DeepSeekApi.ChatCompletionRequest.ReasoningEffort> resolveReasoningEffort(String effort) {
-        try {
-            return java.util.Optional.of(DeepSeekApi.ChatCompletionRequest.ReasoningEffort
-                    .valueOf(effort.trim().toUpperCase(Locale.ROOT)));
-        } catch (IllegalArgumentException e) {
-            log.warn("未知推理强度 [{}]，忽略（DeepSeek 支持: {}", effort,
-                    java.util.Arrays.toString(DeepSeekApi.ChatCompletionRequest.ReasoningEffort.values()));
-            return java.util.Optional.empty();
-        }
-    }
-
-    // ==== 内部：修正 ADK MessageConverter 产出非 DeepSeekChatOptions 的 ClassCastException ====
-    // ADK 的 Spring AI 转换层把 prompt options 交给 ChatModel 时类型不匹配，与 OpenAiChatModel
-    // 时代同源；DeepSeekChatModel.createRequest 会强转 DeepSeekChatOptions，因此工具轮次的
-    // ToolCallingChatOptions 必须以 defaultOptions 为基底合并为 DeepSeekChatOptions。
-
-    private static class DeepSeekChatModelFix implements ChatModel {
-        private final DeepSeekChatModel delegate;
-        private final DeepSeekChatOptions defaultOptions;
-        DeepSeekChatModelFix(DeepSeekChatModel d) { this.delegate = d; this.defaultOptions = (DeepSeekChatOptions) d.getOptions(); }
-        @Override public ChatResponse call(Prompt p) { return delegate.call(fix(p)); }
-        @Override public Flux<ChatResponse> stream(Prompt p) { return delegate.stream(fix(p)); }
-        private Prompt fix(Prompt p) {
-            ChatOptions o = p.getOptions();
-            if (o == null || o instanceof DeepSeekChatOptions) return p;
-            // ADK 产出 ToolCallingChatOptions → 转为 DeepSeekChatOptions：透传模型与工具声明
-            ToolCallingChatOptions t = (ToolCallingChatOptions) o;
-            DeepSeekChatOptions.Builder merged = DeepSeekChatOptions.builder()
-                    .model(defaultOptions.getModel())
-                    .toolCallbacks(t.getToolCallbacks());
-            if (defaultOptions.getThinking() != null) {
-                merged.thinking(defaultOptions.getThinking());
-            }
-            if (defaultOptions.getReasoningEffort() != null) {
-                merged.reasoningEffort(defaultOptions.getReasoningEffort());
-            }
-            return new Prompt(p.getInstructions(), merged.build());
-        }
     }
 }

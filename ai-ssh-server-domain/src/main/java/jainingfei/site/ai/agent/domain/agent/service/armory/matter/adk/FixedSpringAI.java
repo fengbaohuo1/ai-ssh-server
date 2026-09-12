@@ -20,18 +20,15 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.StreamingChatModel;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.metadata.Usage;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.openai.models.chat.completions.ChatCompletion;
-import com.openai.models.completions.CompletionUsage;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.model.ChatModelBundle;
 import jainingfei.site.ai.agent.domain.agent.support.ReasoningTagUtil;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.deepseek.DeepSeekAssistantMessage;
-import org.springframework.ai.deepseek.api.DeepSeekApi;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -57,7 +54,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *        该事件是唯一被 Runner 持久化的 model 事件——会话历史里一次 LLM 调用一条
  *        assistant 事件（替代旧的"每分片一条事件 + SessionService 碎片合并"）。
  *        草稿标记只随聚合事件落库（分片不持久化，无需带标记），下轮重建历史时
- *        解析并放回 DeepSeekAssistantMessage.reasoningContent（L2 草稿延续）。
+ *        解析并通过 ChatModelBundle 放回 provider 的思考字段（L2 草稿延续）。
  *    usageMetadata 映射到聚合事件——供 ADK 事件压缩（tail-retention）读取真实
  *    promptTokenCount 触发折叠。
  *
@@ -71,20 +68,23 @@ public class FixedSpringAI extends BaseLlm {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /** 模型包：厂商差异（options 子类 / 思考草稿消息类型 / 缓存命中提取）全部由它承载 */
+    private final ChatModelBundle bundle;
     private final ChatModel chatModel;
     private final StreamingChatModel streamingChatModel;
 
-    public FixedSpringAI(ChatModel chatModel) {
-        super(extractModelName(chatModel));
-        this.chatModel = chatModel;
-        this.streamingChatModel = chatModel instanceof StreamingChatModel ? (StreamingChatModel) chatModel : null;
+    public FixedSpringAI(ChatModelBundle bundle) {
+        super(extractModelName(bundle.chatModel()));
+        this.bundle = bundle;
+        this.chatModel = bundle.chatModel();
+        this.streamingChatModel = this.chatModel instanceof StreamingChatModel ? (StreamingChatModel) this.chatModel : null;
     }
 
     @Override
     public Flowable<LlmResponse> generateContent(LlmRequest req, boolean stream) {
         try {
             Prompt prompt = toPrompt(req);
-            // 每次模型调用独立的草稿累积器（DeepSeek thinking：草稿分片先于正文到达）
+            // 每次模型调用独立的草稿累积器（思考模型：草稿分片先于正文到达）
             ReasoningAccumulator reasoningAcc = new ReasoningAccumulator();
             if (stream && streamingChatModel != null) {
                 // 流式 usage 只在末块返回，且末块通常无文本——会被下方空白过滤/缓冲逻辑丢弃，
@@ -95,7 +95,8 @@ public class FixedSpringAI extends BaseLlm {
                 Flowable<ChatResponse> observed = Flowable.fromPublisher(
                                 streamingChatModel.stream(prompt))
                         .doOnNext(cr -> observeUsage(cr, usageRef))
-                        .doOnNext(cr -> captureReasoning(cr, reasoningAcc));
+                        .doOnNext(cr -> captureReasoning(cr, reasoningAcc))
+                        .doOnError(error -> logLlmError(error, prompt));
 
                 // ① 分片事件（partial=true，Runner 不持久化，仅流式转发）
                 Flowable<LlmResponse> partials = observed
@@ -105,7 +106,13 @@ public class FixedSpringAI extends BaseLlm {
                         Flowable.defer(() -> buildAggregated(reasoningAcc, streamAcc, usageRef)));
             }
             // 同步路径一次拿全量响应：先捕获草稿再注入（与流式路径一致）
-            ChatResponse resp = chatModel.call(prompt);
+            ChatResponse resp;
+            try {
+                resp = chatModel.call(prompt);
+            } catch (Exception e) {
+                logLlmError(e, prompt);
+                throw e;
+            }
             captureReasoning(resp, reasoningAcc);
             StreamAccumulator streamAcc = new StreamAccumulator();
             List<AssistantMessage.ToolCall> toolCalls = resp.getResult().getOutput().getToolCalls();
@@ -126,7 +133,7 @@ public class FixedSpringAI extends BaseLlm {
         }
     }
 
-    // ===== DeepSeek 思考草稿（reasoning_content）捕获与注入 =====
+    // ===== 思考草稿（reasoning_content）捕获与注入 =====
 
     /** 单次模型调用的草稿状态：分片累积 + 确保只注入一次 */
     private static final class ReasoningAccumulator {
@@ -139,7 +146,7 @@ public class FixedSpringAI extends BaseLlm {
         final StringBuilder visible = new StringBuilder();
         /** 纯空白 chunk 缓冲（phantom 过滤：等下一个文本 chunk 合并后一起发出） */
         final StringBuilder pendingWs = new StringBuilder();
-        /** 工具调用 id → ToolCall（DeepSeek 流式分片可能重复携带完整 tool_calls，按 id 取最新） */
+        /** 工具调用 id → ToolCall（provider 流式分片可能重复携带完整 tool_calls，按 id 取最新） */
         final Map<String, AssistantMessage.ToolCall> toolCalls = new LinkedHashMap<>();
 
         void mergeToolCall(AssistantMessage.ToolCall tc) {
@@ -160,19 +167,17 @@ public class FixedSpringAI extends BaseLlm {
     }
 
     /**
-     * 从流式 chunk 捕获思考草稿分片（原生 DeepSeek 通道的 DeepSeekAssistantMessage 携带
-     * reasoningContent；OpenAI 兼容通道无此类型则自然跳过）。
+     * 从流式 chunk 捕获思考草稿分片（由 {@link ChatModelBundle} 决定该 provider 是否携带
+     * 草稿——无此能力的通道自然返回 null 跳过）。
      */
-    private static void captureReasoning(ChatResponse cr, ReasoningAccumulator acc) {
+    private void captureReasoning(ChatResponse cr, ReasoningAccumulator acc) {
         if (cr == null || cr.getResults().isEmpty()) {
             return;
         }
-        if (cr.getResult().getOutput() instanceof DeepSeekAssistantMessage ds) {
-            String frag = ds.getReasoningContent();
-            if (frag != null && !frag.isEmpty()) {
-                acc.seen = true;
-                acc.reasoning.append(frag);
-            }
+        String frag = bundle.reasoningContent(cr.getResult().getOutput());
+        if (frag != null && !frag.isEmpty()) {
+            acc.seen = true;
+            acc.reasoning.append(frag);
         }
     }
 
@@ -188,38 +193,22 @@ public class FixedSpringAI extends BaseLlm {
     }
 
     /** 输出一次模型调用的 token 消耗（含缓存命中数），用于验证 Prompt Cache 收益 */
-    private static void logUsage(Usage usage) {
+    private void logUsage(Usage usage) {
         if (usage == null) return;
         log.info("LLM usage | promptTokens: {} | completionTokens: {} | totalTokens: {} | cachedTokens: {}",
                 usage.getPromptTokens(), usage.getCompletionTokens(), usage.getTotalTokens(),
                 extractCachedTokens(usage));
     }
 
-    /** 提取缓存命中的 token 数：优先 spring-ai 的 CacheRead 字段（2.0.0 起提供），
-     * 未填充时回退到 OpenAI SDK 原生 usage 的 prompt_tokens_details.cached_tokens。 */
-    private static Long extractCachedTokens(Usage usage) {
+    /** 提取缓存命中的 token 数：优先 spring-ai 通用字段（2.0.0 起提供），
+     * 未填充时交 {@link ChatModelBundle} 从 provider 原生 usage 兜底。 */
+    private Long extractCachedTokens(Usage usage) {
         try {
             Long cached = usage.getCacheReadInputTokens();
             if (cached != null) {
                 return cached;
             }
-            Object nativeUsage = usage.getNativeUsage();
-            if (nativeUsage instanceof CompletionUsage completionUsage) {
-                return completionUsage.promptTokensDetails()
-                        .flatMap(CompletionUsage.PromptTokensDetails::cachedTokens)
-                        .orElse(null);
-            }
-            if (nativeUsage instanceof ChatCompletion chatCompletion) {
-                return chatCompletion.usage()
-                        .flatMap(u -> u.promptTokensDetails())
-                        .flatMap(CompletionUsage.PromptTokensDetails::cachedTokens)
-                        .orElse(null);
-            }
-            // DeepSeek 原生通道（spring-ai-deepseek 2.0.1）
-            if (nativeUsage instanceof DeepSeekApi.Usage dsUsage) {
-                DeepSeekApi.Usage.PromptTokensDetails details = dsUsage.promptTokensDetails();
-                return details != null ? details.cachedTokens().longValue() : null;
-            }
+            return bundle.cachedTokens(usage);
         } catch (Exception e) {
             log.debug("提取缓存命中 token 失败: {}", e.getMessage());
         }
@@ -227,7 +216,7 @@ public class FixedSpringAI extends BaseLlm {
     }
 
     /** spring-ai Usage → genai usageMetadata（压缩引擎读取真实 promptTokenCount） */
-    private static GenerateContentResponseUsageMetadata toUsageMetadata(Usage usage) {
+    private GenerateContentResponseUsageMetadata toUsageMetadata(Usage usage) {
         if (usage == null) {
             return null;
         }
@@ -252,6 +241,57 @@ public class FixedSpringAI extends BaseLlm {
 
     // ===== LlmRequest → Prompt =====
 
+    /**
+     * LLM 调用失败诊断：打印服务端响应体 + 本次请求的消息配对形状。
+     *
+     * <p>为什么要打这两样：provider 的 400 大多不是"网络问题"，而是<b>消息序列不合法</b>——
+     * 典型的如 tool 消息与前置 tool_calls 不配对、思考字段缺失被回传校验拒绝。
+     * 只看到 "400 Bad Request" 无从下手，必须拿到服务端原文与请求角色序列。
+     */
+    private void logLlmError(Throwable error, Prompt prompt) {
+        try {
+            if (error instanceof org.springframework.web.reactive.function.client.WebClientResponseException http) {
+                log.error("LLM 请求失败 | status:{} | body:{}", http.getStatusCode(), http.getResponseBodyAsString());
+            } else {
+                log.error("LLM 请求失败 | {}", error.getMessage());
+            }
+            log.error("LLM 请求形状 | {}", describePrompt(prompt));
+        } catch (Exception e) {
+            log.debug("请求诊断信息输出失败: {}", e.getMessage());
+        }
+    }
+
+    /** 请求消息形状摘要：角色序列 + tool_calls/tool 响应 id 配对（截断展示，仅供排查） */
+    private String describePrompt(Prompt prompt) {
+        List<String> parts = new ArrayList<>();
+        for (Message message : prompt.getInstructions()) {
+            String role = String.valueOf(message.getMessageType());
+            if (message instanceof AssistantMessage assistant) {
+                List<String> callIds = assistant.getToolCalls().stream()
+                        .map(tc -> tc.id() + "/" + tc.name())
+                        .toList();
+                boolean hasReasoning = bundle.reasoningContent(assistant) != null;
+                parts.add("assistant(toolCalls=" + callIds + ",reasoning=" + hasReasoning
+                        + ",text=" + abbreviate(assistant.getText()) + ")");
+            } else if (message instanceof ToolResponseMessage toolMessage) {
+                List<String> responseIds = toolMessage.getResponses().stream()
+                        .map(ToolResponseMessage.ToolResponse::id)
+                        .toList();
+                parts.add("tool(ids=" + responseIds + ")");
+            } else {
+                parts.add(role + "(text=" + abbreviate(message.getText()) + ")");
+            }
+        }
+        return String.join(" -> ", parts);
+    }
+
+    private static String abbreviate(String text) {
+        if (text == null) {
+            return "null";
+        }
+        return text.length() <= 40 ? text.replace('\n', '⏎') : text.substring(0, 40).replace('\n', '⏎') + "…";
+    }
+
     private Prompt toPrompt(LlmRequest req) {
         List<Message> messages = new ArrayList<>();
         List<String> systemTexts = new ArrayList<>(req.getSystemInstructions());
@@ -271,8 +311,8 @@ public class FixedSpringAI extends BaseLlm {
                     break;
                 case "model":
                 case "assistant":
-                    // DeepSeek thinking：历史 assistant 必须携带 reasoning_content 回传。
-                    // 事件文本含隐藏草稿标记 → 解析后构造 DeepSeekAssistantMessage；
+                    // 思考模型：历史 assistant 必须携带 provider 的思考字段回传。
+                    // 事件文本含隐藏草稿标记 → 解析后交 ChatModelBundle 构造该 provider 消息；
                     // 无草稿（旧会话/标记损坏）→ 跳过该条历史（宁可丢上轮回复文本，
                     // 工具结果/上下文都在 user 消息里，也不触发服务端 400）
                     messages.addAll(toHistoryAssistantMessages(content));
@@ -286,13 +326,14 @@ public class FixedSpringAI extends BaseLlm {
             messages.add(0, new SystemMessage(String.join("\n\n", systemTexts)));
         }
 
-        // 工具声明：ADK 工具 → Spring AI ToolCallback → ToolCallingChatOptions
-        ToolCallingChatOptions opts = null;
+        // 工具声明：ADK 工具 → Spring AI ToolCallback → provider 的 per-call options
+        // （options 子类由 ChatModelBundle 给出：provider 在 options 非空时不再合并默认值）
+        ChatOptions opts = null;
         if (req.tools() != null && !req.tools().isEmpty()) {
             ToolConverter converter = new ToolConverter();
             List<ToolCallback> callbacks = converter.convertToSpringAiTools(req.tools());
             if (!callbacks.isEmpty()) {
-                opts = ToolCallingChatOptions.builder().toolCallbacks(callbacks).build();
+                opts = bundle.options(callbacks);
             }
         }
 
@@ -332,10 +373,10 @@ public class FixedSpringAI extends BaseLlm {
 
     /**
      * 历史 assistant 事件 → spring-ai 消息列表（0 或 1 条）：
-     * 解析事件文本中的隐藏草稿标记，构造 {@link DeepSeekAssistantMessage}（草稿放
-     * reasoningContent、正文放 content）。
+     * 解析事件文本中的隐藏草稿标记，由 {@link ChatModelBundle} 构造该 provider 的
+     * assistant 消息（草稿放 provider 的思考字段、正文放 content）。
      *
-     * <p>降级策略（V3 实测校准）：DeepSeek 并非每次调用都产出 reasoning_content——
+     * <p>降级策略（V3 实测校准）：provider 并非每次调用都产出 reasoning_content——
      * 无草稿标记的文本事件跳过（L1 兜底，防"原响应有草稿却未回传"的 400）；
      * 但<b>携带 FunctionCall 的 assistant 事件必须保留</b>（tool 消息要与前置
      * tool_calls 配对，整条跳过会导致 "Messages with role 'tool' must be a response
@@ -365,20 +406,11 @@ public class FixedSpringAI extends BaseLlm {
         String reasoning = parsed[0];
         String visible = parsed[1] == null ? "" : parsed[1];
 
-        DeepSeekAssistantMessage.Builder builder = DeepSeekAssistantMessage.builder();
-        if (reasoning != null) {
-            builder.reasoningContent(reasoning);
-        } else if (toolCalls.isEmpty()) {
-            // 无草稿且无工具调用：整条跳过（DeepSeek thinking+工具场景无法确认原文是否带草稿）
+        if (reasoning == null && toolCalls.isEmpty()) {
+            // 无草稿且无工具调用：整条跳过（thinking+工具场景无法确认原文是否带草稿）
             return List.of();
         }
-        // DeepSeekChatModel.createRequest 对 assistant 消息断言 content 文本非 null——
-        // 纯工具调用消息可见文本为空时回退空串（内容由 tool_calls 承载）
-        builder.content(visible);
-        if (!toolCalls.isEmpty()) {
-            builder.toolCalls(toolCalls);
-        }
-        return List.of(builder.build());
+        return List.of(bundle.assistantMessage(visible, reasoning, toolCalls));
     }
 
     // ===== ChatResponse → LlmResponse（分片 / 聚合） =====
