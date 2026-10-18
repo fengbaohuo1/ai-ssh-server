@@ -12,6 +12,7 @@ import io.reactivex.rxjava3.core.Single;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.AgentExecutionContext;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.DynamicTask;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.TaskStatus;
+import jainingfei.site.ai.agent.domain.agent.support.DispatchBudget;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Map;
@@ -41,7 +42,10 @@ public class SubAgentDispatchTool extends BaseTool {
     private final SubAgentDispatchService dispatchService;
 
     public SubAgentDispatchTool(BaseAgent subAgent, SubAgentDispatchService dispatchService) {
-        super(subAgent.name(), subAgent.description());
+        // 工具描述直接决定模型"什么时候点它"：把子智能体职责说清楚，同时明确"简单命令别派发"，
+        // 否则模型会把单条命令也拆成子任务（派发链路 LLM 轮次多、易失败）。
+        super(subAgent.name(), "派发任务给子智能体「" + subAgent.name() + "」：" + subAgent.description()
+                + "。仅当该任务需要多轮探索/隔离上下文时才使用；单条或少量命令请自己用 executeCommand 完成。");
         this.subAgent = subAgent;
         this.dispatchService = dispatchService;
     }
@@ -74,6 +78,24 @@ public class SubAgentDispatchTool extends BaseTool {
         String request = String.valueOf(args.getOrDefault("request", ""));
         return Single.<Map<String, Object>>fromCallable(() -> {
             AgentExecutionContext context = SubAgentDispatchContext.from(toolContext);
+            String sessionId = SubAgentDispatchContext.sessionIdOf(toolContext);
+
+            // 派发预算：拦嵌套、限次数、限同任务重复
+            String nested = DispatchBudget.rejectChildSessionDispatch(sessionId);
+            if (nested != null) {
+                log.warn("子Agent派发被拦截（嵌套派发）| parent:{} | sessionId:{}", context.getAgentName(), sessionId);
+                return ImmutableMap.of("success", false, "error", nested);
+            }
+            String callError = DispatchBudget.reserveDispatchCall(sessionId);
+            if (callError != null) {
+                log.warn("子Agent派发被拦截（次数上限）| parent:{} | sessionId:{}", context.getAgentName(), sessionId);
+                return ImmutableMap.of("success", false, "error", callError);
+            }
+            String taskError = DispatchBudget.reserveTask(sessionId, subAgent.name(), request);
+            if (taskError != null) {
+                log.warn("子Agent派发被拦截（重复/超额）| parent:{} | subAgent:{}", context.getAgentName(), subAgent.name());
+                return ImmutableMap.of("success", false, "error", taskError);
+            }
 
             // taskId 取本次工具调用 id：让"派发卡片"与"任务节点"共用同一个步骤 id，
             // 前端按 id upsert 后原地升级（子智能体的命令挂在它下面），不再多一层同名嵌套

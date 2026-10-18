@@ -102,7 +102,8 @@ public class AgentConfigFileStore {
     }
 
     /**
-     * 写主配置：语法/结构校验 → 备份 agent.yml.bak → 临时文件 + ATOMIC_MOVE 落盘。
+     * 写主配置：保存前置校验（{@link AgentConfigValidator}）→ 备份 agent.yml.bak → 临时文件 + ATOMIC_MOVE 落盘。
+     * <p>校验不通过时直接抛异常，磁盘原文件不动、也不会产生备份文件（不存在"写了一半"的中间态）。
      *
      * @param content 新 YAML 全文
      * @throws AgentConfigValidationException 校验失败（JSON 侧返回 code=0002）
@@ -122,17 +123,54 @@ public class AgentConfigFileStore {
         }
     }
 
-    /** 校验：合法 YAML 且必须存在 ai.agent.config.tables（结构缺失给可操作提示） */
+    /**
+     * 保存前校验（全部通过才允许备份 + 写盘，失败时磁盘原文件保持不动）：
+     * YAML 语法 / 根节点对象 → {@link AgentConfigValidator} 结构、引用、模型通道、MCP 条目语义校验。
+     *
+     * <p>provider / model 允许回退 llm.yml 覆盖层：模型配置页只写覆盖层，主配置里可能本来就没有
+     * provider/model，运行时两者合并后才是有效配置，保存校验必须同语义（否则老配置无法保存）。
+     */
     private void validateAgentYaml(String content) {
         Object root = safeLoad(content, "agent.yml");
         if (!(root instanceof Map<?, ?> rootMap)) {
             throw new AgentConfigValidationException("agent.yml 根节点必须是对象（key: value 结构）");
         }
-        Object tables = dig(rootMap, TABLES_PATH);
-        if (!(tables instanceof Map<?, ?> tableMap) || tableMap.isEmpty()) {
-            throw new AgentConfigValidationException(
-                    "缺少 ai.agent.config.tables 配置（至少需要一个智能体配置表，例如 sshAgent）");
+        AgentConfigValidator.validateOrThrow(rootMap, readOverlayChatModels());
+    }
+
+    /** 读出 llm.yml 覆盖层里每张配置表的 provider/model，供保存校验做"空值回退" */
+    private Map<String, AgentConfigValidator.OverlayChatModel> readOverlayChatModels() {
+        Map<String, AgentConfigValidator.OverlayChatModel> overlays = new LinkedHashMap<>();
+        Map<String, Object> root;
+        try {
+            root = loadExistingOverlay();
+        } catch (RuntimeException e) {
+            // 覆盖层自身损坏不应阻塞主配置保存：退化为"无回退值"
+            log.warn("读取 llm.yml 覆盖层失败，保存校验忽略覆盖层回退值 | {}", e.getMessage());
+            return overlays;
         }
+        Object tables = dig(root, TABLES_PATH);
+        if (!(tables instanceof Map<?, ?> tableMap)) {
+            return overlays;
+        }
+        for (Map.Entry<?, ?> entry : tableMap.entrySet()) {
+            Object chatModel = child(child(entry.getValue(), "module"), "chat-model");
+            if (!(chatModel instanceof Map<?, ?> chatModelMap)) {
+                continue;
+            }
+            overlays.put(String.valueOf(entry.getKey()), new AgentConfigValidator.OverlayChatModel(
+                    trimToNull(asString(chatModelMap.get("provider"))),
+                    trimToNull(asString(chatModelMap.get("model")))));
+        }
+        return overlays;
+    }
+
+    private static Object child(Object node, String key) {
+        return node instanceof Map<?, ?> map ? map.get(key) : null;
+    }
+
+    private static String asString(Object value) {
+        return value instanceof String string ? string : null;
     }
 
     /** 文件不存在时从 classpath 模板初始化 */

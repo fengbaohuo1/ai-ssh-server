@@ -109,7 +109,32 @@ public class RemoteToolMcpCreateService implements ToolMcpCreateService {
             return c;
         }
 
-        @Override public void close() { if (session != null) try { session.close(); } catch (Exception ignored) {} }
+        /**
+         * 幂等关闭：热重装回收上一版工具集时调用。
+         * <p>先摘掉 session / 工具缓存再关，重复调用不会二次关闭；关闭失败只告警，
+         * 不阻断热重装（旧连接由 JVM 回收兜底）。
+         */
+        @Override
+        public void close() {
+            McpSyncClient current = session;
+            session = null;
+            cachedTools = null;
+            lastFailureAt = 0;
+            if (current == null) {
+                return;
+            }
+            try {
+                current.close();
+                log.info("Remote MCP [{}] session 已关闭", name);
+            } catch (Exception e) {
+                log.warn("Remote MCP [{}] session 关闭失败（忽略，继续回收）| {}", name, e.getMessage());
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "RemoteMcpToolset[" + name + "]";
+        }
     }
 
     private static class McpToolAdapter extends BaseTool {

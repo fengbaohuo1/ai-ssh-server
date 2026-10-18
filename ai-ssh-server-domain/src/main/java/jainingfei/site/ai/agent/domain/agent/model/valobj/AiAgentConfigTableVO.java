@@ -108,6 +108,14 @@ public class AiAgentConfigTableVO {
 
                 private LocalParameters local;
 
+                /**
+                 * 该 MCP server 提供的工具是否"对只读智能体安全"（YAML 键 mcp-readonly-safe，缺省 null=false）。
+                 * <p>read-only=true 的智能体默认<b>不挂载任何 MCP 工具集</b>——MCP 工具的语义不可判定，
+                 * 可能包含写操作；只有显式声明 {@code mcp-readonly-safe: true}（确认该 server 只提供只读/查询类
+                 * 工具）的条目才会挂载到只读智能体。非只读智能体不受此字段影响，照旧全量挂载。
+                 */
+                private Boolean mcpReadonlySafe;
+
                 @Data
                 public static class RemoteServerParameters {
                     private String name;

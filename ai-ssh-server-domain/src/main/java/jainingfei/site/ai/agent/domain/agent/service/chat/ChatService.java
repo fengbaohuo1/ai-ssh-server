@@ -21,6 +21,7 @@ import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.SshExecuteAdkTool;
 import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
+import jainingfei.site.ai.agent.domain.agent.support.DispatchBudget;
 import jainingfei.site.ai.agent.domain.ssh.model.aggregate.SshConnectionAggregate;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshConnectionService;
 import jainingfei.site.ai.agent.types.enums.ResponseCode;
@@ -155,6 +156,7 @@ public class ChatService implements IChatService {
 
         Runner runner = aiAgentRegisterVO.getRunner();
         sessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
+        DispatchBudget.beginTurn(sessionId);
 
         Content userMsg = Content.fromParts(Part.fromText(message));
         Flowable<Event> events = runner.runAsync(userId, sessionId, userMsg,
@@ -182,6 +184,7 @@ public class ChatService implements IChatService {
 
         Runner runner = aiAgentRegisterVO.getRunner();
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
+        DispatchBudget.beginTurn(effectiveSessionId);
 
         // ADK 的 InMemorySessionService 自动管理对话历史
         Content userMsg = Content.fromParts(Part.fromText(message));
@@ -199,15 +202,31 @@ public class ChatService implements IChatService {
         Runner runner = aiAgentRegisterVO.getRunner();
         String effectiveSessionId = ensureSessionExists(runner, aiAgentRegisterVO.getAppName(), userId, sessionId);
 
+        // 新一轮对话：重置派发预算（派发次数/子任务数/重复任务在本次请求内独立计数）
+        DispatchBudget.beginTurn(effectiveSessionId);
+
         // 将 SSH 连接 ID 设置到静态字段，供 SshExecuteAdkTool 在 ADK 线程中读取
         // terminalSessionId 字段携带的是 connectionId（统一终端会话后，以 connectionId 为 key）
+        // 前端重启/刷新后可能丢失"当前绑定的服务器"，此时回退到该会话上一次绑定的连接，
+        // 避免整轮对话在"未绑定"状态下白白消耗模型回合。
+        String binding = terminalSessionId;
+        boolean fallback = false;
+        if (binding == null || binding.isBlank()) {
+            String remembered = SshSessionBindings.connectionOf(effectiveSessionId);
+            if (remembered != null && !remembered.isBlank()) {
+                binding = remembered;
+                fallback = true;
+                log.info("请求未携带终端会话，回退到会话上次绑定 connectionId={} sessionId={}", remembered, effectiveSessionId);
+            }
+        }
+
         String serverContext = "";
-        if (terminalSessionId != null && !terminalSessionId.isEmpty()) {
-            log.info("设置 SSH 连接 ID: {}", terminalSessionId);
-            SshSessionBindings.bindSession(effectiveSessionId, terminalSessionId);
+        if (binding != null && !binding.isBlank()) {
+            log.info("设置 SSH 连接 ID: {}{}", binding, fallback ? "（会话上次绑定）" : "");
+            SshSessionBindings.bindSession(effectiveSessionId, binding);
             // 查询服务器信息，注入到 LLM 上下文，让它知道连了哪台机器
             try {
-                SshConnectionAggregate aggregate = sshConnectionService.queryConnectionDetail(terminalSessionId);
+                SshConnectionAggregate aggregate = sshConnectionService.queryConnectionDetail(binding);
                 if (aggregate != null && aggregate.getConnection() != null) {
                     var conn = aggregate.getConnection();
                     serverContext = String.format(
@@ -216,8 +235,14 @@ public class ChatService implements IChatService {
                     log.info("已注入服务器上下文: {}", serverContext.trim());
                 }
             } catch (Exception e) {
-                log.warn("获取服务器信息失败 connectionId={}", terminalSessionId, e);
+                log.warn("获取服务器信息失败 connectionId={}", binding, e);
             }
+        } else {
+            // 未绑定服务器：显式告诉模型，避免它反复尝试工具、把"未绑定"当成命令失败
+            serverContext = "\n<server_context>\n当前未绑定任何服务器。你无法执行任何 SSH 命令，"
+                    + "也不要在未执行的情况下编造执行结果。请先提示用户在界面顶部选择并连接目标服务器，"
+                    + "连接好之后再继续排查。\n</server_context>\n\n";
+            log.warn("本轮对话未绑定服务器 sessionId={}，已注入未绑定提示", effectiveSessionId);
         }
 
         // ADK 的 InMemorySessionService 自动管理对话历史，不需要手动嵌入

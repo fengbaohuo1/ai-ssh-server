@@ -6,10 +6,15 @@ import com.google.adk.runner.Runner;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
 import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.disposables.Disposable;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
+import jainingfei.site.ai.agent.cases.react.DynamicSuffixBudget;
+import jainingfei.site.ai.agent.cases.react.SseSteps;
+import jainingfei.site.ai.agent.cases.react.TurnCancelledException;
+import jainingfei.site.ai.agent.cases.react.TurnToolSummaryCache;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentRegisterVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
@@ -26,10 +31,14 @@ import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * AI 调用节点 — 回合执行（V3 托管循环，一次用户消息 = 一次 runAsync）。
@@ -217,12 +226,34 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                 chatContextService.getRecentCommands(ctx.getSessionId()),
                 ctx.getMessageHistory(), intentLabel);
 
+        // domain 缓存在回合末必清（UserFeedbackNode.cleanup），跨回合的"上一轮工具摘要"
+        // 由 case 层独立键补进来，否则 [工具执行摘要] 永远是空段
+        suffix = appendPreviousToolSummary(ctx, suffix);
+
         String correction = chatContextService.consumePendingIntentCorrection(ctx.getSessionId());
         if (correction != null && !correction.isEmpty()) {
             suffix = suffix.isEmpty() ? correction : suffix + "\n" + correction;
         }
+        // 动态后缀预算兜底：Provider 输出无上限，按节裁剪到固定预算（错误/未绑定行优先保留）
+        suffix = DynamicSuffixBudget.apply(suffix);
         String entry = suffix.isEmpty() ? message : message + "\n---\n" + suffix;
         return Content.fromParts(Part.fromText(entry));
+    }
+
+    /** 把"最近一轮工具执行摘要"补进后缀（数据源：TurnToolSummaryCache，回合末由收口节点写入） */
+    private String appendPreviousToolSummary(DefaultReActFactory.DynamicContext ctx, String suffix) {
+        String previous = TurnToolSummaryCache.get(ctx.getSessionId());
+        if (previous == null || previous.isBlank()) {
+            return suffix == null ? "" : suffix;
+        }
+        String base = suffix == null ? "" : suffix;
+        // domain Provider 若将来仍提供该段（缓存未清），避免重复注入
+        if (base.contains("[工具执行摘要]")) {
+            return base;
+        }
+        // 明确标注"上一轮"，避免模型把历史摘要当成本轮已执行的事实
+        String section = "[工具执行摘要]\n（上一轮执行结果，仅供衔接上下文；本轮是否已执行以本轮工具结果为准）\n" + previous;
+        return base.isEmpty() ? section : base + "\n\n" + section;
     }
 
     private String ctxCurrentIntentName(DefaultReActFactory.DynamicContext ctx) {
@@ -242,9 +273,17 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                             .streamingMode(RunConfig.StreamingMode.SSE)
                             .maxLlmCalls(sessionGovernance.getLoop().getMaxLlmCalls())
                             .build());
-            events.blockingForEach(event -> handleRunnerEvent(event, ctx));
+            consumeEvents(events, ctx);
 
             log.info("ADK Runner 回合事件流处理完成，工具请求 {} 次", ctx.getToolCallCount());
+        } catch (TurnCancelledException e) {
+            // 客户端断开/超时：Runner 事件流已 dispose，本回合不再继续消耗模型与工具
+            log.info("ReAct 回合已取消: {}", e.getMessage());
+            ctx.setErrorMessage("本轮对话已取消: " + e.getMessage());
+            ctx.setStopReason("cancelled");
+            if (ctx.getResult() != null) {
+                ctx.getResult().setUserStopped(true);
+            }
         } catch (Exception e) {
             log.error("ADK Runner 调用失败: {}", e.getMessage(), e);
             ctx.setErrorMessage("ADK Runner error: " + e.getMessage());
@@ -255,6 +294,74 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         }
     }
 
+    /**
+     * 可取消地消费 Runner 事件流。
+     *
+     * <p>客户端断开时（心跳失败、SSE 发送失败、onTimeout/onError 回调经
+     * {@link SseSteps#cancel}）取消回调会 dispose 上游订阅并唤醒这里——而不是像旧实现那样
+     * 静默地跑完整个模型与工具链。事件流自然结束（onComplete）与出错（onError）走同一把锁存器，
+     * 消费语义与 {@code blockingForEach} 一致（仍在订阅线程消费）。
+     */
+    private void consumeEvents(Flowable<Event> events, DefaultReActFactory.DynamicContext ctx)
+            throws InterruptedException {
+        SseEmitter emitter = ctx.getEmitter();
+        if (emitter == null) {
+            // 无 emitter（非流式场景）：保持原有阻塞消费语义
+            events.blockingForEach(event -> handleRunnerEvent(event, ctx));
+            return;
+        }
+        CountDownLatch finished = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicBoolean disposed = new AtomicBoolean(false);
+        Disposable subscription = events.subscribe(
+                event -> {
+                    if (SseSteps.isCancelled(emitter)) {
+                        throw new TurnCancelledException(SseSteps.cancellationReason(emitter));
+                    }
+                    handleRunnerEvent(event, ctx);
+                    if (SseSteps.isCancelled(emitter)) {
+                        throw new TurnCancelledException(SseSteps.cancellationReason(emitter));
+                    }
+                },
+                error -> {
+                    failure.set(error);
+                    finished.countDown();
+                },
+                finished::countDown);
+
+        // 取消入口：SseSteps.cancel → dispose 上游事件流，并唤醒等待线程
+        Runnable cancelHook = () -> {
+            if (disposed.compareAndSet(false, true)) {
+                subscription.dispose();
+                finished.countDown();
+            }
+        };
+        SseSteps.setCancelHook(emitter, cancelHook);
+        // 注册钩子之前可能已经收到取消信号（发送已失败的竞态）：补一次，避免 await 永久挂住
+        if (SseSteps.isCancelled(emitter)) {
+            cancelHook.run();
+        }
+        try {
+            finished.await();
+        } finally {
+            SseSteps.clearCancelHook(emitter);
+            if (disposed.compareAndSet(false, true)) {
+                subscription.dispose();
+            }
+        }
+
+        Throwable error = failure.get();
+        if (error instanceof TurnCancelledException cancelled) {
+            throw cancelled;
+        }
+        if (error != null) {
+            throw new RuntimeException(error.getMessage(), error);
+        }
+        if (SseSteps.isCancelled(emitter)) {
+            throw new TurnCancelledException(SseSteps.cancellationReason(emitter));
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  事件中继（V3 partial/聚合语义）
     // ═══════════════════════════════════════════════════════════════
@@ -262,8 +369,11 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
     /** 处理单个 Runner 事件：文本增量 / 工具调用步骤 / 工具结果收集 / 调用边界落段 */
     private void handleRunnerEvent(Event event, DefaultReActFactory.DynamicContext ctx) {
         // ① 文本增量：分片直发；聚合事件与分片重复时跳过（防重复渲染）
-        String delta = EventTextUtil.visibleTextDelta(event, ctx.getVisibleText());
+        //    累积器用"本次 LLM 调用"的缓冲（currentCallText），回合累积只追加结果——
+        //    用全回合累积去比对时，第二次调用的聚合事件不构成前缀关系，差额会被丢掉
+        String delta = EventTextUtil.visibleTextDelta(event, ctx.getCurrentCallText());
         if (delta != null) {
+            ctx.getVisibleText().append(delta);
             ctx.getCurrentUtterance().append(delta);
             ctx.setUtteranceCharsSinceAggregated(ctx.getUtteranceCharsSinceAggregated() + delta.length());
             sendText(ctx.getEmitter(), delta);
@@ -289,12 +399,13 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
                     success, ctx.takeStepElapsedMs(result.id()));
         }
 
-        // ④ 一次 LLM 调用的真实 usage（聚合事件携带）→ 回合累计，收口时以 usage 步骤下发
-        event.usageMetadata().ifPresent(ctx::accumulateUsage);
-
-        // ⑤ 聚合事件（partial 为空）= 一次 LLM 调用结束 → 本次调用文本转入 utterances（收口落库）
+        // ④⑤ 聚合事件（partial 为空）= 一次 LLM 调用结束：
+        //     usage 只在这里累计（适配器只给聚合事件挂 usageMetadata），与文本/草稿的调用边界
+        //     保持同一口径；随后本次调用文本转入 utterances（收口落库），并重置本调用累积器
         if (!EventTextUtil.isPartial(event)) {
+            event.usageMetadata().ifPresent(ctx::accumulateUsage);
             flushCurrentUtterance(ctx);
+            ctx.getCurrentCallText().setLength(0);
         }
     }
 

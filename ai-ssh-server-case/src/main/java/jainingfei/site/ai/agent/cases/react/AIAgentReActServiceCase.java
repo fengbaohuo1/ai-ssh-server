@@ -5,6 +5,8 @@ import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
 import jainingfei.site.ai.agent.cases.react.node.RootNode;
+import jainingfei.site.ai.agent.types.enums.ResponseCode;
+import jainingfei.site.ai.agent.types.exception.AppException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -102,7 +104,10 @@ public class AIAgentReActServiceCase implements IAIAgentReActServiceCase {
             return result.getContent();
         } catch (Exception e) {
             log.error("ReAct 同步对话异常", e);
-            return "Error: " + e.getMessage();
+            // 不再用 "Error: xxx" 文本伪装成功（调用方/前端无法区分成功与失败）：
+            // 抛统一 AppException（UN_ERROR=0001），错误信息保留原始异常文本
+            throw new AppException(ResponseCode.UN_ERROR.getCode(),
+                    e.getMessage() != null && !e.getMessage().isBlank() ? e.getMessage() : "未知失败", e);
         }
     }
 

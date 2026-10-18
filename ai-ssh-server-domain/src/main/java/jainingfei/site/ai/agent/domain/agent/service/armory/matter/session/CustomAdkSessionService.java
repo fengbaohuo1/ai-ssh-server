@@ -13,6 +13,7 @@ import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Single;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.model.SessionSnapshot;
+import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -93,6 +94,8 @@ public class CustomAdkSessionService implements BaseSessionService {
     @Override
     public Completable deleteSession(String appName, String userId, String sessionId) {
         store.deleteSession(appName, userId, sessionId);
+        // 会话真正删除时解绑 SSH 连接（回合末不再解绑，绑定要跨回合保留以支持"恢复上次服务器"）
+        SshSessionBindings.unbindSession(sessionId);
         return Completable.complete();
     }
 

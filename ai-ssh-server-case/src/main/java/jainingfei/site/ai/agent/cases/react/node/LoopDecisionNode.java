@@ -5,11 +5,18 @@ import jainingfei.site.ai.agent.api.dto.ChatRequestDTO;
 import jainingfei.site.ai.agent.api.dto.ReActResultDTO;
 import jainingfei.site.ai.agent.cases.react.AbstractAIAgentReActSupport;
 import jainingfei.site.ai.agent.cases.react.factory.DefaultReActFactory;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentResultVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.IntentTypeEnumVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.intent.TaskStateVO;
+import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
+import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Map;
 
 /**
  * ReAct 循环决策节点 — V3 回合收尾决策（教学版 LoopDecisionNode 语义的映射 + V3.2 任务态收口）。
@@ -33,6 +40,9 @@ public class LoopDecisionNode extends AbstractAIAgentReActSupport {
 
     @Resource
     private IIntentService intentService;
+
+    @Resource
+    private IChatContextService chatContextService;
 
     @Override
     protected ReActResultDTO doApply(ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
@@ -89,12 +99,19 @@ public class LoopDecisionNode extends AbstractAIAgentReActSupport {
             boolean hasToolResults = ctx.getToolResultsCollected() != null
                     && !ctx.getToolResultsCollected().isEmpty();
 
-            if ("error".equals(stopReason)) {
+            if ("error".equals(stopReason) || "cancelled".equals(stopReason)) {
                 intentService.markTaskInterrupted(sessionId);
-                log.info("回合异常中断，任务态保持可续接 rootIntent={}", taskState.getRootIntent());
+                log.info("回合{}，任务态保持可续接 rootIntent={}", stopReason, taskState.getRootIntent());
                 return;
             }
             if (hasToolResults && !taskState.isLastFeedbackFailed() && !taskState.isCompleted()) {
+                // 附加闸门：不能只看"这回合碰过工具"——最后一轮工具失败、或结果把意图改判成
+                // 非业务意图/另一个业务意图时，任务并没有真正达成，保持进行中让用户下一句可续接
+                String blockReason = completionBlockReason(ctx, taskState);
+                if (blockReason != null) {
+                    log.info("回合未归档任务（{}）rootIntent={}", blockReason, taskState.getRootIntent());
+                    return;
+                }
                 intentService.markTaskCompleted(sessionId);
                 log.info("回合正常达成，任务态归档完成 rootIntent={} steps={}",
                         taskState.getRootIntent(),
@@ -104,6 +121,46 @@ public class LoopDecisionNode extends AbstractAIAgentReActSupport {
         } catch (Exception e) {
             log.warn("任务态回合收口失败，跳过（不影响收尾）: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 完成判定的附加闸门（修复"碰过工具即完成"的变体误判）。
+     *
+     * <p>两道条件：
+     * <ol>
+     *   <li>最后一轮工具结果必须是结构化成功（{@code success=true}）——TaskStateVO 的
+     *       lastFeedbackFailed 是"最近一次反馈打点"，ToolCallNode 副作用异常等场景可能漏更新，
+     *       这里直接以本回合收集到的最后一条结果为唯一判据；</li>
+     *   <li>最后反馈后的会话意图必须仍是业务意图且与任务根意图一致——结果把意图改判成
+     *       CHAT/UNKNOWN/CONTINUE 或另一个业务意图时，说明动作与任务目标不完全对应，不归档。</li>
+     * </ol>
+     *
+     * @return 不满足归档条件的原因；可归档返回 null
+     */
+    private String completionBlockReason(DefaultReActFactory.DynamicContext ctx, TaskStateVO taskState) {
+        List<EventTextUtil.ToolResultView> results = ctx.getToolResultsCollected();
+        if (results == null || results.isEmpty()) {
+            return "无工具结果";
+        }
+        EventTextUtil.ToolResultView lastResult = results.get(results.size() - 1);
+        Map<String, Object> response = lastResult.response();
+        if (response == null || !Boolean.TRUE.equals(response.get("success"))) {
+            return "最后一轮工具执行未成功: " + lastResult.name();
+        }
+        IntentResultVO currentIntent = chatContextService.getSessionIntent(ctx.getSessionId());
+        if (currentIntent == null || currentIntent.getIntent() == null) {
+            return null;
+        }
+        IntentTypeEnumVO intent = currentIntent.getIntent();
+        if (intent == IntentTypeEnumVO.CHAT
+                || intent == IntentTypeEnumVO.UNKNOWN
+                || intent == IntentTypeEnumVO.CONTINUE) {
+            return "最后反馈意图不是业务意图: " + intent.name();
+        }
+        if (taskState.getRootIntent() != null && intent != taskState.getRootIntent()) {
+            return "最后反馈意图与任务根意图不一致: " + intent.name() + " != " + taskState.getRootIntent().name();
+        }
+        return null;
     }
 
 }

@@ -163,6 +163,9 @@ public abstract class AbstractAIAgentReActSupport
                     try {
                         emitter.send(SseEmitter.event().comment("heartbeat"));
                     } catch (Exception e) {
+                        // 心跳发不出去 = 客户端大概率已断开：标记取消，AiCallNode 据此 dispose
+                        // 本轮 Runner 事件流（否则客户端已经走了，后台还在白烧模型与工具调用）
+                        SseSteps.cancel(emitter, "心跳发送失败（客户端可能已断开）: " + e.getMessage());
                         break;
                     }
                 }
@@ -172,10 +175,20 @@ public abstract class AbstractAIAgentReActSupport
         t.setDaemon(true);
         t.start();
 
-        // 注册回调：流结束或出错时停止心跳
-        emitter.onCompletion(() -> streaming.set(false));
-        emitter.onTimeout(() -> streaming.set(false));
-        emitter.onError(e -> streaming.set(false));
+        // 注册回调：流结束或出错时停止心跳；断开/超时同时作为"取消本回合"的入口
+        emitter.onCompletion(() -> {
+            streaming.set(false);
+            SseSteps.release(emitter);
+        });
+        emitter.onTimeout(() -> {
+            streaming.set(false);
+            SseSteps.cancel(emitter, "SSE 连接超时（客户端可能已断开）");
+        });
+        emitter.onError(e -> {
+            streaming.set(false);
+            SseSteps.cancel(emitter, "SSE 连接错误（客户端可能已断开）: "
+                    + (e == null ? "unknown" : e.getMessage()));
+        });
 
         return t;
     }

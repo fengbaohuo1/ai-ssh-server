@@ -1,5 +1,6 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
 
+import jainingfei.site.ai.agent.domain.agent.support.AgentTaskContextPropagator;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -12,11 +13,16 @@ import java.util.regex.Pattern;
  *
  * <pre>
  *   ① 危险命令拦截：正则命中直接拒绝执行（防模型幻觉导致的系统损坏）
- *   ② 空命令熔断：同一连接上连续多次空参数调用达到阈值后中断，提示模型改用文字回答
+ *   ② 空命令熔断：同一 <b>会话/智能体维度 + connectionId</b> 上连续多次空参数调用达到阈值后中断，
+ *      提示模型改用文字回答
  * </pre>
  *
- * <p>空命令计数按 connectionId 维护（语义与原实现一致：连续计数、有效命令或触发熔断后清零）；
- * 危险命令判定在"终端会话存在"之后执行，保持原有的判定次序与提示文案。
+ * <p><b>空命令计数维度</b>：只按 connectionId 计数时，同一条 SSH 连接上并发跑的多个子智能体
+ * （规划/批量派发）会互相累加计数——A 的两次空调用 + B 的一次就触发熔断，冤枉了 B。
+ * 现在计数 key = {@code 作用域 \0 connectionId}：作用域由 {@link AgentTaskContextPropagator#currentScope()}
+ * 提供（{@code userId@appName/agentName}），取不到时退化为原 connectionId 维度，保持单智能体/单测行为不变。
+ *
+ * <p>危险命令判定在"终端会话存在"之后执行，保持原有的判定次序与提示文案。
  */
 @Slf4j
 @Component
@@ -24,6 +30,17 @@ public class CommandGuard {
 
     /** 连续空命令上限（达到即中断调用） */
     public static final int MAX_EMPTY_CALLS = 3;
+
+    /** 复合计数 key 的分隔符（作用域与 connectionId 都不含 \u0000，不会歧义） */
+    private static final char KEY_SEPARATOR = '\u0000';
+
+    /** 熔断提示：保留可读性，明确要求模型停止调用工具、改用文字回答 */
+    public static final String INTERRUPT_MESSAGE =
+            "已中断重复调用。请直接用文字向用户说明当前情况，不要再调用 executeCommand。";
+
+    /** 参数缺失提示（空命令但未达熔断阈值） */
+    public static final String MISSING_PARAM_MESSAGE =
+            "参数缺失：executeCommand 必须提供 command 参数。示例：command=\"ls -la\"";
 
     /**
      * 危险命令模式——直接拦截不执行。
@@ -43,7 +60,7 @@ public class CommandGuard {
             Pattern.CASE_INSENSITIVE
     );
 
-    /** connectionId → 连续空命令次数 */
+    /** 复合计数 key（{@code 作用域 \0 connectionId}）→ 连续空命令次数 */
     private final ConcurrentHashMap<String, AtomicInteger> emptyCallCounters = new ConcurrentHashMap<>();
 
     /**
@@ -99,10 +116,25 @@ public class CommandGuard {
                     Pattern.CASE_INSENSITIVE)
     };
 
-    /** 记录一次空命令调用，返回连续次数 */
+    /**
+     * 记录一次空命令调用，返回连续次数。
+     *
+     * <p>作用域取当前任务上下文（{@link AgentTaskContextPropagator#currentScope()}）；
+     * 拿不到作用域时退化为原 connectionId 维度，兼容同步/单测场景。
+     */
     public int onEmptyCommand(String connectionId) {
+        return onEmptyCommand(AgentTaskContextPropagator.currentScope(), connectionId);
+    }
+
+    /**
+     * 记录一次空命令调用，返回该"会话/智能体维度 + connectionId"上的连续次数。
+     *
+     * @param scope        会话/智能体作用域（null/空白 = 只按 connectionId 计数）
+     * @param connectionId SSH 连接 ID（可空）
+     */
+    public int onEmptyCommand(String scope, String connectionId) {
         return emptyCallCounters
-                .computeIfAbsent(connectionId, k -> new AtomicInteger(0))
+                .computeIfAbsent(counterKey(scope, connectionId), k -> new AtomicInteger(0))
                 .incrementAndGet();
     }
 
@@ -111,9 +143,66 @@ public class CommandGuard {
         return emptyCount >= MAX_EMPTY_CALLS;
     }
 
-    /** 清零空命令计数（有效命令到达、或熔断中断后调用） */
+    /**
+     * 空命令决策——工具层一行接入，返回明确失败（{@code success == false}，不会因熔断而变成成功）。
+     *
+     * <p>熔断命中时立即清零，下一次空命令重新从 1 开始计数（与旧的"中断后 reset"行为一致）。
+     *
+     * @param scope        会话/智能体作用域（null/空白 = 只按 connectionId 计数）
+     * @param connectionId SSH 连接 ID（可空）
+     */
+    public EmptyCommandDecision onEmptyCommandDecision(String scope, String connectionId) {
+        int count = onEmptyCommand(scope, connectionId);
+        boolean interrupted = isInterrupted(count);
+        if (interrupted) {
+            resetEmptyCommands(scope, connectionId);
+            log.warn("空命令熔断触发：scope={} connectionId={} count={}", scope, connectionId, count);
+        } else {
+            log.debug("空命令计数：scope={} connectionId={} count={}", scope, connectionId, count);
+        }
+        return new EmptyCommandDecision(interrupted, count,
+                interrupted ? INTERRUPT_MESSAGE : MISSING_PARAM_MESSAGE);
+    }
+
+    /** 清零空命令计数（有效命令到达、或熔断中断后调用；清掉该连接下所有作用域的计数） */
     public void resetEmptyCommands(String connectionId) {
-        emptyCallCounters.remove(connectionId);
+        emptyCallCounters.keySet().removeIf(key -> matchesConnection(key, connectionId));
+    }
+
+    /** 清零指定"会话/智能体维度 + connectionId"的计数 */
+    public void resetEmptyCommands(String scope, String connectionId) {
+        emptyCallCounters.remove(counterKey(scope, connectionId));
+    }
+
+    /** 复合 key：作用域存在时 {@code scope \0 connectionId}，否则仅 connectionId（保持旧行为） */
+    private static String counterKey(String scope, String connectionId) {
+        String connection = connectionId == null ? "" : connectionId;
+        if (scope == null || scope.isBlank()) {
+            return connection;
+        }
+        return scope + KEY_SEPARATOR + connection;
+    }
+
+    /** key 是否属于指定连接（兼容"仅 connectionId"与"作用域+connectionId"两种形态） */
+    private static boolean matchesConnection(String key, String connectionId) {
+        String connection = connectionId == null ? "" : connectionId;
+        int separator = key.lastIndexOf(KEY_SEPARATOR);
+        return (separator >= 0 ? key.substring(separator + 1) : key).equals(connection);
+    }
+
+    /**
+     * 空命令处理结果。
+     *
+     * @param interrupted true = 达到熔断阈值（应中断重复调用）
+     * @param count       本次计数
+     * @param message     给模型的提示文案
+     */
+    public record EmptyCommandDecision(boolean interrupted, int count, String message) {
+
+        /** 恒定失败：空命令不是成功，熔断更不是成功（工具层据此填 success=false） */
+        public boolean success() {
+            return false;
+        }
     }
 
     /** 是否命中危险命令模式 */

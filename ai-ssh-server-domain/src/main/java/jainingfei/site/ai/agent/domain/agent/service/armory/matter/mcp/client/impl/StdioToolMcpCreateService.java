@@ -104,7 +104,31 @@ public class StdioToolMcpCreateService implements ToolMcpCreateService {
                     }
                 });
             }
-            @Override public void close() { if (session != null) try { session.close(); } catch (Exception ignored) {} }
+            /**
+             * 幂等关闭：热重装回收上一版工具集时调用。
+             * <p>先摘掉 session 再关，重复调用不会二次关闭；关闭失败只告警，不阻断热重装
+             * （stdio 子进程由 close 负责终止，异常时交给系统回收）。
+             */
+            @Override
+            public void close() {
+                McpSyncClient current = session;
+                session = null;
+                lastFailureAt = 0;
+                if (current == null) {
+                    return;
+                }
+                try {
+                    current.close();
+                    log.info("Stdio MCP [{}] session 已关闭", name);
+                } catch (Exception e) {
+                    log.warn("Stdio MCP [{}] session 关闭失败（忽略，继续回收）| {}", name, e.getMessage());
+                }
+            }
+
+            @Override
+            public String toString() {
+                return "StdioMcpToolset[" + name + "]";
+            }
         };
     }
 }

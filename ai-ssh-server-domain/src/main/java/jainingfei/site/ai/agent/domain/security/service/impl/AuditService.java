@@ -7,6 +7,7 @@ import jainingfei.site.ai.agent.domain.security.model.valobj.enums.AuditActionEn
 import jainingfei.site.ai.agent.domain.security.model.valobj.enums.RiskLevelEnum;
 import jainingfei.site.ai.agent.domain.security.model.valobj.properties.SecurityProperties;
 import jainingfei.site.ai.agent.domain.security.service.IAuditService;
+import jainingfei.site.ai.agent.domain.security.support.AuditContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -44,7 +45,7 @@ public class AuditService implements IAuditService {
                     : (action != null ? action.getDefaultRisk() : RiskLevelEnum.LOW);
             auditLogRepository.save(AuditLogEntity.builder()
                     .userId(defaultUser(userId))
-                    .connectionId(connectionId)
+                    .connectionId(defaultConnectionId(connectionId))
                     .connectionName(connectionName)
                     .action(action)
                     .resource(truncate(resource, MAX_RESOURCE_LENGTH))
@@ -52,7 +53,7 @@ public class AuditService implements IAuditService {
                     .riskLevel(risk)
                     .success(success)
                     .durationMs(Math.max(durationMs, 0))
-                    .clientIp(clientIp)
+                    .clientIp(defaultClientIp(clientIp))
                     .createdAt(LocalDateTime.now())
                     .build());
         } catch (Exception e) {
@@ -85,8 +86,22 @@ public class AuditService implements IAuditService {
         }
     }
 
+    /**
+     * 兜底读取审计上下文：调用方显式传值优先；为空时取当前线程的 {@link AuditContext}。
+     *
+     * <p>子智能体/工具线程不经过 Web 过滤器，调用方传空是常态；AuditContext 已由
+     * {@code AgentTaskContextPropagator} 在线程池边界完成传播，这里读取即可，不改变"显式传值优先"的语义。
+     */
     private static String defaultUser(String userId) {
-        return (userId == null || userId.isBlank()) ? "default" : userId;
+        return (userId == null || userId.isBlank()) ? AuditContext.userId() : userId;
+    }
+
+    private static String defaultClientIp(String clientIp) {
+        return (clientIp == null || clientIp.isBlank()) ? AuditContext.clientIp() : clientIp;
+    }
+
+    private static String defaultConnectionId(String connectionId) {
+        return (connectionId == null || connectionId.isBlank()) ? AuditContext.connectionId() : connectionId;
     }
 
     private static String truncate(String value, int max) {

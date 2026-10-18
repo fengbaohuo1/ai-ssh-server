@@ -15,13 +15,19 @@ import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.SpringAiL
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ChatModelFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ModelTuning;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderProfile;
+import io.reactivex.rxjava3.disposables.Disposable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 规划器构建器——临时造一个"只会输出 JSON 计划"的智能体，跑一轮，把计划文本交给解析器（教程 2-10）。
@@ -93,20 +99,51 @@ public class PlannerAgentBuilder {
 
         String prompt = "用户任务:" + userRequest + "\n允许Agent:" + allowed;
         long startedAt = System.currentTimeMillis();
+        // 事件收集 + 完成信号：超时后必须 dispose 掉订阅（真正取消上游），否则 Rx 的 timeout 只是
+        // 让调用方放弃等待，ADK 仍在后台跑模型——线程与连接都悬挂着
+        List<Event> events = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch finished = new CountDownLatch(1);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Disposable disposable = null;
         try {
-            List<Event> events = runner.runAsync("planner-user", "planner-" + UUID.randomUUID(),
+            disposable = runner.runAsync("planner-user", "planner-" + UUID.randomUUID(),
                             Content.fromParts(Part.fromText(prompt)),
                             RunConfig.builder().autoCreateSession(true).build())
-                    .timeout(PLANNER_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    .toList()
-                    .blockingGet();
+                    // 订阅放到 io 调度器：本方法的调用线程只负责等信号，不会被同步流卡住而失去超时能力
+                    .subscribeOn(Schedulers.io())
+                    .subscribe(events::add,
+                            error -> {
+                                failure.set(error);
+                                finished.countDown();
+                            },
+                            finished::countDown);
+
+            if (!finished.await(PLANNER_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                disposable.dispose();
+                log.warn("规划器执行超时，已取消上游 | 耗时={}ms | timeout={}s",
+                        System.currentTimeMillis() - startedAt, PLANNER_TIMEOUT_SECONDS);
+                throw new IllegalStateException("规划器执行超时（timeout=" + PLANNER_TIMEOUT_SECONDS + "s）");
+            }
+
+            Throwable streamError = failure.get();
+            if (streamError != null) {
+                log.error("规划器调用失败 | 耗时={}ms", System.currentTimeMillis() - startedAt, streamError);
+                throw new IllegalStateException("planner failed", streamError);
+            }
+
             String planText = SubAgentResultExtractor.pickFinalText(events);
             log.info("规划器输出 | 耗时={}ms | 文本长度={} | allowedAgents:[{}]",
                     System.currentTimeMillis() - startedAt, planText.length(), allowed);
             return planText;
-        } catch (Exception e) {
-            log.error("规划器调用失败 | 耗时={}ms", System.currentTimeMillis() - startedAt, e);
-            throw new IllegalStateException("planner failed", e);
+        } catch (InterruptedException interrupted) {
+            // 被外层取消：恢复中断标记并立即退出，不留悬挂订阅
+            Thread.currentThread().interrupt();
+            log.error("规划器调用被中断 | 耗时={}ms", System.currentTimeMillis() - startedAt);
+            throw new IllegalStateException("规划器调用被中断", interrupted);
+        } finally {
+            if (disposable != null && !disposable.isDisposed()) {
+                disposable.dispose();
+            }
         }
     }
 }

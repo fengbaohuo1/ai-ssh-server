@@ -10,7 +10,9 @@ import com.google.genai.types.Type;
 import io.reactivex.rxjava3.core.Single;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.AgentExecutionContext;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.DynamicTask;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.DynamicTaskPlan;
+import jainingfei.site.ai.agent.domain.agent.support.DispatchBudget;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
@@ -87,12 +89,42 @@ public class DynamicPlanDispatchTool extends BaseTool {
     public Single<Map<String, Object>> runAsync(Map<String, Object> args, ToolContext toolContext) {
         String request = String.valueOf(args.getOrDefault("request", ""));
         return Single.fromCallable(() -> {
+            String sessionId = SubAgentDispatchContext.sessionIdOf(toolContext);
+
+            // 派发预算前置：先拦嵌套与次数上限，避免白跑一次规划器 LLM
+            String nested = DispatchBudget.rejectChildSessionDispatch(sessionId);
+            if (nested != null) {
+                log.warn("规划派发被拦截（嵌套派发）| sessionId:{}", sessionId);
+                return ImmutableMap.<String, Object>of("success", false, "error", nested);
+            }
+            String callError = DispatchBudget.reserveDispatchCall(sessionId);
+            if (callError != null) {
+                log.warn("规划派发被拦截（次数上限）| sessionId:{}", sessionId);
+                return ImmutableMap.<String, Object>of("success", false, "error", callError);
+            }
+
             // ① 规划
             String planJson = plannerAgentBuilder.plan(modelConfig, request, allowedAgents);
             // ② 解析
             DynamicTaskPlan plan = planParser.parse(planJson, allowedAgents);
             // ③ 校验
             planValidator.validate(plan, MAX_TASKS);
+
+            // 规划结果也要过预算：超限就整单拒绝，让父智能体缩小范围，不要盲目执行
+            StringBuilder rejected = new StringBuilder();
+            for (DynamicTask task : plan.getTasks()) {
+                String reason = DispatchBudget.reserveTask(sessionId, task.getAgentName(), task.getRequest());
+                if (reason != null) {
+                    rejected.append(task.getAgentName()).append(':').append(reason).append("；");
+                }
+            }
+            if (rejected.length() > 0) {
+                log.warn("规划派发被预算拦截 | sessionId:{} | tasks:{} | reason:{}",
+                        sessionId, plan.getTasks().size(), rejected);
+                return ImmutableMap.<String, Object>of("success", false, "error",
+                        "规划出的子任务超出本轮派发预算：" + rejected
+                                + "请缩小范围后自己执行，或把剩余检查合并成少量命令。");
+            }
 
             AgentExecutionContext context = SubAgentDispatchContext.from(toolContext);
             log.info("规划派发开始 | parent:{} | tasks:{} | maxConcurrency:{} | failFast:{} | terminalSession:{}",

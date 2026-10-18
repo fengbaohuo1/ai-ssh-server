@@ -40,6 +40,18 @@ final class SubAgentDispatchContext {
                 .build();
     }
 
+    /** 当前 ADK 会话 ID（派发预算/嵌套拦截的键）；取不到返回 null */
+    static String sessionIdOf(ToolContext toolContext) {
+        if (toolContext == null) {
+            return null;
+        }
+        try {
+            return toolContext.sessionId();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** 本次工具调用 id（步骤树的父节点）；取不到返回 null，前端按顶层渲染 */
     private static String resolveFunctionCallId(ToolContext toolContext) {
         if (toolContext == null) {

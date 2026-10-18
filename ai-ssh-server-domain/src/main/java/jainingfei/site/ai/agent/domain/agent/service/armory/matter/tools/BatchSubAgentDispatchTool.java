@@ -10,9 +10,12 @@ import com.google.genai.types.Schema;
 import com.google.genai.types.Type;
 import io.reactivex.rxjava3.core.Single;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.AgentExecutionContext;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.DynamicTask;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.DynamicTaskPlan;
+import jainingfei.site.ai.agent.domain.agent.support.DispatchBudget;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -58,8 +61,9 @@ public class BatchSubAgentDispatchTool extends BaseTool {
                                      DynamicAgentOrchestrator orchestrator,
                                      PlanParser planParser,
                                      PlanValidator planValidator) {
-        super("dispatchSubAgents", "批量派发多个已配置子Agent：支持任务依赖、并行执行与结果汇总，"
-                + "适合一次提交多个相互独立或存在先后依赖的任务");
+        super("dispatchSubAgents", "批量派发多个已配置子Agent：只在一轮里存在 2 个以上相互独立、"
+                + "且每个都需要多轮排查/隔离上下文的任务时才用；单条命令或少量检查请自己 executeCommand。"
+                + "支持任务依赖、并行执行与结果汇总");
         this.allowedAgents = List.copyOf(allowedAgents);
         this.orchestrator = orchestrator;
         this.planParser = planParser;
@@ -112,12 +116,54 @@ public class BatchSubAgentDispatchTool extends BaseTool {
             planValidator.validate(plan, MAX_TASKS);
 
             AgentExecutionContext context = SubAgentDispatchContext.from(toolContext);
-            log.info("批量派发开始 | parent:{} | tasks:{} | maxConcurrency:{} | failFast:{} | terminalSession:{}",
-                    context.getAgentName(), plan.getTasks().size(), plan.getMaxConcurrency(), plan.getFailFast(),
+            String sessionId = SubAgentDispatchContext.sessionIdOf(toolContext);
+
+            // 派发预算：先拦住"子智能体再派发"和"一轮派发太多次"，再逐任务占用额度
+            String nested = DispatchBudget.rejectChildSessionDispatch(sessionId);
+            if (nested != null) {
+                log.warn("批量派发被拦截（嵌套派发）| parent:{} | sessionId:{}", context.getAgentName(), sessionId);
+                return ImmutableMap.<String, Object>of("success", false, "error", nested);
+            }
+            String callError = DispatchBudget.reserveDispatchCall(sessionId);
+            if (callError != null) {
+                log.warn("批量派发被拦截（次数上限）| parent:{} | sessionId:{}", context.getAgentName(), sessionId);
+                return ImmutableMap.<String, Object>of("success", false, "error", callError);
+            }
+
+            List<DynamicTask> accepted = new ArrayList<>();
+            List<Map<String, Object>> rejected = new ArrayList<>();
+            StringBuilder rejectSummary = new StringBuilder();
+            for (DynamicTask task : plan.getTasks()) {
+                String reason = DispatchBudget.reserveTask(sessionId, task.getAgentName(), task.getRequest());
+                if (reason == null) {
+                    accepted.add(task);
+                } else {
+                    rejected.add(ImmutableMap.of(
+                            "taskId", task.getTaskId() == null ? "" : task.getTaskId(),
+                            "agentName", task.getAgentName() == null ? "" : task.getAgentName(),
+                            "reason", reason));
+                    rejectSummary.append(task.getAgentName()).append(':').append(reason).append("；");
+                }
+            }
+            if (accepted.isEmpty()) {
+                log.warn("批量派发全部被拦截 | parent:{} | rejected:{}", context.getAgentName(), rejected.size());
+                return ImmutableMap.<String, Object>of("success", false, "error",
+                        "所有子任务都被派发预算拦截：" + rejectSummary
+                                + "。请自己用 executeCommand 等工具完成，不要继续派发。");
+            }
+            if (!rejected.isEmpty()) {
+                plan.setTasks(accepted);
+            }
+
+            log.info("批量派发开始 | parent:{} | tasks:{} | rejected:{} | maxConcurrency:{} | failFast:{} | terminalSession:{}",
+                    context.getAgentName(), accepted.size(), rejected.size(), plan.getMaxConcurrency(), plan.getFailFast(),
                     context.getTerminalSessionId());
 
             Map<String, Object> result = orchestrator.execute(context, plan);
             result.put("success", result.get("allSucceeded"));
+            if (!rejected.isEmpty()) {
+                result.put("budgetRejected", rejected);
+            }
             return result;
         }).onErrorReturn(error -> {
             log.warn("批量派发失败: {}", error.getMessage());

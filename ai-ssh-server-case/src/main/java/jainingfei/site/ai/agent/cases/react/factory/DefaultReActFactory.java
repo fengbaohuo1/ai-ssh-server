@@ -85,6 +85,15 @@ public class DefaultReActFactory {
         @Builder.Default
         private StringBuilder currentUtterance = new StringBuilder();
 
+        /**
+         * 当前一次 LLM 调用的文本累积（只在本调用边界内有效，聚合事件后清空）。
+         * <p>与 {@link #visibleText}（回合累积）分开：聚合事件的文本是"本次调用全文"，
+         * 只有与"本次调用已收到分片"比对才能正确算出尾部差额；拿全回合累积去比对时，
+         * 第二次及之后的调用会因不构成前缀关系而丢差额（多调用聚合吞文本 bug）。
+         */
+        @Builder.Default
+        private StringBuilder currentCallText = new StringBuilder();
+
         /** 当前缓冲中"尚未转入 utterances"的字符数（聚合事件边界判定用） */
         @Builder.Default
         private int utteranceCharsSinceAggregated = 0;

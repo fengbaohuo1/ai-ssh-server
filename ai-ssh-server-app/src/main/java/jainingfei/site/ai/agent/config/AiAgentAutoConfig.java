@@ -78,8 +78,10 @@ public class AiAgentAutoConfig implements ApplicationListener<ApplicationReadyEv
     /**
      * 配置变更后热重装（同步执行）。
      *
-     * <p>先刷新配置快照再装配：{@code /api/v1/query_ai_agent_config_list}、运行概览等读取同一个
-     * {@link AiAgentAutoConfigProperties} Bean，不刷新会一直显示旧配置。
+     * <p><b>顺序约束</b>：先装配成功、再刷新配置快照 Bean。装配抛异常时 {@code tables} 与
+     * {@code aiAgentAutoConfigProperties} 都保持旧值，旧装配继续服务，异常向上抛给保存接口
+     * （{@code AgentConfigController#hotReload} 转成 {@code applied=false} + 原因）。
+     * 若先 setTables 再装配，就会出现"配置页显示新配置、实际跑的还是旧装配"的错位。
      *
      * @throws IllegalStateException 装配未启用 / 无可装配的 Key / 装配失败（调用方转换为前端提示）
      */
@@ -90,8 +92,6 @@ public class AiAgentAutoConfig implements ApplicationListener<ApplicationReadyEv
         AiAgentAutoConfigProperties fresh = agentConfigFileStore.loadEffectiveProperties();
         Map<String, AiAgentConfigTableVO> tables =
                 fresh.getTables() == null ? Map.of() : fresh.getTables();
-        aiAgentAutoConfigProperties.setEnabled(fresh.isEnabled());
-        aiAgentAutoConfigProperties.setTables(tables);
 
         if (!fresh.isEnabled()) {
             throw new IllegalStateException("ai.agent.config.enabled=false，已跳过智能体装配");
@@ -109,6 +109,10 @@ public class AiAgentAutoConfig implements ApplicationListener<ApplicationReadyEv
         } catch (Exception e) {
             throw new IllegalStateException("智能体重装配失败: " + e.getMessage(), e);
         }
+
+        // 装配成功后才刷新配置快照 Bean（/api/v1/query_ai_agent_config_list、运行概览等读取它）
+        aiAgentAutoConfigProperties.setEnabled(fresh.isEnabled());
+        aiAgentAutoConfigProperties.setTables(tables);
         log.info("Ai Agent 热重装完成 | tables:{}（新对话轮次立即生效，无需重启）", armable.size());
     }
 

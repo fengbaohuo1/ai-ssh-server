@@ -32,6 +32,8 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -93,12 +95,16 @@ public class AgentNode extends AbstractArmorySupport {
     @Resource
     private PlanValidator planValidator;
 
+    /** appName → 当前生效版本装配出的工具集（热重装提交时用于回收上一版，避免 MCP session 泄漏） */
+    private final Map<String, List<BaseToolset>> activeToolsets = new ConcurrentHashMap<>();
+
     @Override
     protected AiAgentRegisterVO doApply(ArmoryCommandEntity requestParameter, DefaultArmoryFactory.DynamicContext dynamicContext) throws Exception {
         log.info("Ai Agent 装配操作 - AgentNode");
 
         AiAgentConfigTableVO aiAgentConfigTableVO = requestParameter.getAiAgentConfigTableVO();
         List<AiAgentConfigTableVO.Module.Agent> agents = aiAgentConfigTableVO.getModule().getAgents();
+        AiAgentConfigTableVO.Module.ChatModel chatModelConfig = aiAgentConfigTableVO.getModule().getChatModel();
         ProviderProfile providerProfile = dynamicContext.getProviderProfile();
 
         // MCP/技能工具集（ChatModelNode 装配）：不再向共享列表里塞 SSH 工具，
@@ -110,12 +116,11 @@ public class AgentNode extends AbstractArmorySupport {
         for (AiAgentConfigTableVO.Module.Agent agentConfig : agents) {
             dynamicContext.getAgentGroup().put(agentConfig.getName(),
                     buildAgent(agentConfig, providerProfile,
-                            leafToolsets(agentConfig, mcpOnlyToolsets)));
+                            leafToolsets(agentConfig, chatModelConfig, mcpOnlyToolsets)));
         }
 
         // 第二段：为声明了 sub-agents 的智能体换上派发工具集
-        buildAgentTools(dynamicContext, agents, providerProfile, mcpOnlyToolsets,
-                aiAgentConfigTableVO.getModule().getChatModel());
+        buildAgentTools(dynamicContext, agents, providerProfile, mcpOnlyToolsets, chatModelConfig);
 
         return router(requestParameter, dynamicContext);
     }
@@ -137,14 +142,17 @@ public class AgentNode extends AbstractArmorySupport {
     /**
      * 执行型智能体的工具集：命令执行 + 目录浏览 + 文件读取，非只读时再加文件写入。
      *
-     * <p>MCP / 技能工具对所有执行型智能体保持可见。executeCommand 每个智能体一个实例
+     * <p>MCP / 技能工具对执行型智能体保持可见；<b>只读智能体默认不挂载 MCP 工具集</b>
+     * （MCP 工具语义不可判定，可能含写操作），只有配置了 {@code mcp-readonly-safe: true}
+     * 的 MCP 条目才放行——见 {@link #mcpToolsetsFor}。executeCommand 每个智能体一个实例
      * （prototype），只读智能体的实例会在命令级拦截写操作（见 {@link SshExecuteAdkTool#setReadOnly}）。
      */
     private List<Object> leafToolsets(AiAgentConfigTableVO.Module.Agent agentConfig,
+                                     AiAgentConfigTableVO.Module.ChatModel chatModelConfig,
                                      List<BaseToolset> mcpOnlyToolsets) {
         List<Object> tools = new ArrayList<>();
         tools.add(new StaticToolset(leafToolList(agentConfig, "执行型")));
-        tools.addAll(mcpOnlyToolsets);
+        tools.addAll(mcpToolsetsFor(agentConfig, chatModelConfig, mcpOnlyToolsets));
         return tools;
     }
 
@@ -217,7 +225,7 @@ public class AgentNode extends AbstractArmorySupport {
 
             List<Object> tools = new ArrayList<>();
             tools.add(new StaticToolset(parentTools));
-            tools.addAll(mcpOnlyToolsets);
+            tools.addAll(mcpToolsetsFor(agentConfig, chatModelConfig, mcpOnlyToolsets));
 
             dynamicContext.getAgentGroup().put(agentConfig.getName(),
                     buildAgent(agentConfig, providerProfile, tools));
@@ -241,6 +249,120 @@ public class AgentNode extends AbstractArmorySupport {
                     + "（智能体 " + agentConfig.getName() + "；可选 hybrid / dispatch-only）");
         }
         return mode;
+    }
+
+    /**
+     * 该智能体实际可挂载的 MCP/技能工具集。
+     *
+     * <p>规则（v3.2 只读边界扩展）：非只读智能体全量挂载；只读智能体<b>默认不挂载任何 MCP 条目</b>，
+     * 只有该 MCP 条目声明 {@code mcp-readonly-safe: true}（确认 server 只提供只读/查询类工具）才放行。
+     * 技能（skills）工具集不是 MCP，始终保留。
+     *
+     * <p>边界计算：ChatModelNode 先按 tool-mcp-list 顺序 1:1 追加 MCP toolset、再追加 skills 工具集，
+     * 因此用 {@code toolMcpList.size()} 切分，而不是猜列表结构；数量不一致时按全量挂载并告警。
+     */
+    private List<BaseToolset> mcpToolsetsFor(AiAgentConfigTableVO.Module.Agent agentConfig,
+                                             AiAgentConfigTableVO.Module.ChatModel chatModelConfig,
+                                             List<BaseToolset> allToolsets) {
+        if (allToolsets == null) {
+            return List.of();
+        }
+        if (chatModelConfig == null || allToolsets.isEmpty()) {
+            return allToolsets;
+        }
+        List<AiAgentConfigTableVO.Module.ChatModel.ToolMcp> mcpEntries = chatModelConfig.getToolMcpList();
+        int mcpCount = mcpEntries == null ? 0 : mcpEntries.size();
+        if (mcpCount > allToolsets.size()) {
+            log.warn("MCP 工具集数量与配置不一致，按全量挂载 | agent:{} | mcpCount:{} | toolsets:{}",
+                    agentConfig.getName(), mcpCount, allToolsets.size());
+            mcpCount = allToolsets.size();
+        }
+        boolean readOnly = Boolean.TRUE.equals(agentConfig.getReadOnly());
+        List<BaseToolset> toolsets = new ArrayList<>();
+        for (int i = 0; i < mcpCount; i++) {
+            BaseToolset toolset = allToolsets.get(i);
+            if (toolset == null) {
+                continue;
+            }
+            AiAgentConfigTableVO.Module.ChatModel.ToolMcp entry =
+                    mcpEntries != null && i < mcpEntries.size() ? mcpEntries.get(i) : null;
+            String serverName = mcpServerName(entry, i);
+            boolean safe = entry != null && Boolean.TRUE.equals(entry.getMcpReadonlySafe());
+            if (!readOnly || safe) {
+                toolsets.add(toolset);
+                if (readOnly) {
+                    log.info("MCP 工具集放行 | agent:{} | server:{} | mcp-readonly-safe:true（只读智能体显式放行）",
+                            agentConfig.getName(), serverName);
+                }
+            } else {
+                log.info("MCP 工具集未挂载 | agent:{} | server:{} | 原因:read-only 智能体默认不挂载 MCP"
+                                + "（工具语义不可判定，可能含写操作），确认只读可加 mcp-readonly-safe:true",
+                        agentConfig.getName(), serverName);
+            }
+        }
+        // skills 工具集：不是 MCP，语义只读（注入指令 + 目录读取），只读智能体也保留
+        for (int i = mcpCount; i < allToolsets.size(); i++) {
+            BaseToolset toolset = allToolsets.get(i);
+            if (toolset != null) {
+                toolsets.add(toolset);
+            }
+        }
+        return toolsets;
+    }
+
+    /** MCP server 名（日志用）：优先配置里的 name，取不到用下标兜底 */
+    private static String mcpServerName(AiAgentConfigTableVO.Module.ChatModel.ToolMcp entry, int index) {
+        if (entry != null) {
+            if (entry.getRemote() != null && entry.getRemote().getName() != null) {
+                return entry.getRemote().getName();
+            }
+            if (entry.getStdio() != null && entry.getStdio().getName() != null) {
+                return entry.getStdio().getName();
+            }
+            if (entry.getLocal() != null && entry.getLocal().getName() != null) {
+                return entry.getLocal().getName();
+            }
+        }
+        return "mcp[" + index + "]";
+    }
+
+    /**
+     * 热重装提交点：装配<b>成功之后</b>由
+     * {@link jainingfei.site.ai.agent.domain.agent.service.armory.ArmoryService} 调用——
+     * 登记本版工具集，并关闭上一版装配产出的 MCP/技能工具集
+     * （否则 MCP session / stdio 子进程会随每次保存泄漏）。
+     *
+     * <p>安全约束：
+     * <ul>
+     *   <li>只关本类登记过的旧实例，不碰 {@code CustomAdkSessionService}、不碰 Runner / Agent；</li>
+     *   <li>旧列表里仍出现在本版列表中的实例（复用）跳过不关；</li>
+     *   <li>单个 close 失败只 WARN 并继续，绝不影响装配结果；</li>
+     *   <li>装配失败路径不会调用本方法 —— 旧工具集保持可用，旧装配继续服务。</li>
+     * </ul>
+     */
+    public void recyclePreviousMcpToolsets(String appName, List<BaseToolset> currentToolsets) {
+        String key = appName == null || appName.isBlank() ? "default" : appName;
+        List<BaseToolset> current = currentToolsets == null ? List.of() : new ArrayList<>(currentToolsets);
+        List<BaseToolset> previous = activeToolsets.put(key, current);
+        if (previous == null || previous.isEmpty()) {
+            log.info("热重装工具集登记 | appName:{} | 本版:{} | 旧版:0（首次装配，无需回收）", key, current.size());
+            return;
+        }
+        int closed = 0;
+        for (BaseToolset toolset : previous) {
+            if (toolset == null || current.contains(toolset)) {
+                continue;   // 同一实例本版仍在使用，不能关
+            }
+            try {
+                toolset.close();
+                closed++;
+            } catch (Exception e) {
+                log.warn("热重装回收旧 MCP 工具集失败（忽略，继续回收）| appName:{} | toolset:{} | {}",
+                        key, toolset, e.getMessage());
+            }
+        }
+        log.info("热重装回收旧 MCP 工具集 | appName:{} | 旧版:{} | 已关闭:{} | 本版:{}",
+                key, previous.size(), closed, current.size());
     }
 
     @Override

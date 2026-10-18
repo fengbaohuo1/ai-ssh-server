@@ -1,4 +1,5 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
+import jainingfei.site.ai.agent.domain.agent.support.AgentTaskContextPropagator;
 import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
 import jainingfei.site.ai.agent.domain.agent.support.ReActStepSink;
 import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
@@ -11,23 +12,29 @@ import com.google.adk.runner.Runner;
 import com.google.adk.sessions.BaseSessionService;
 import com.google.genai.types.Content;
 import com.google.genai.types.Part;
+import io.reactivex.rxjava3.core.Scheduler;
+import io.reactivex.rxjava3.disposables.Disposable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.AgentExecutionContext;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.DynamicTask;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.dynamic.TaskStatus;
 import jainingfei.site.ai.agent.domain.agent.service.armory.catalog.AgentCatalog;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.session.factory.CustomRunnerFactory;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 子智能体任务执行器——面向"运行期规划出来的任务列表"执行单个 {@link DynamicTask}（教程 2-10）。
@@ -47,6 +54,11 @@ import java.util.concurrent.TimeUnit;
  *   <li>执行期失败按 2^n 秒指数退避重试（封顶 30 秒）；"子智能体不存在""结果为空"属确定性错误不重试</li>
  *   <li>finally 回收子会话，避免常驻内存的会话服务里堆积一次性会话</li>
  * </ol>
+ *
+ * <p><b>超时语义（本轮加固）</b>：旧实现用 Rx 的 {@code timeout} 运算符——超时只让下游放弃，
+ * 上游 flowable 并没有被取消，ADK 还在后台跑模型、SSH 命令也还在执行，线程与连接都悬挂。
+ * 现在改为"订阅放到 io 调度器 + 用 {@link CountDownLatch} 等完成信号"，超时即
+ * {@link Disposable#dispose()}（真正向下游传播取消、终止上游），并在 finally 里回收子会话。
  */
 @Slf4j
 @Service
@@ -60,6 +72,24 @@ public class SubAgentDispatchService {
 
     /** 单任务默认超时（秒） */
     private static final int DEFAULT_TASK_TIMEOUT_SECONDS = 120;
+
+    /**
+     * 订阅线程池：ADK 的事件流要在独立线程上跑，本线程才能"等超时后 dispose"。
+     *
+     * <p>不用 Rx 自带的 {@link Schedulers#io()}：它不传播 {@code ThreadLocal}，子智能体的 SSH 工具
+     * 写审计时会读不到父上下文的 userId / connectionId。这里用 daemon 缓存池 + 上下文包装执行器，
+     * 等价于 io 调度器的线程复用行为，但任务进入执行线程前会恢复父线程的审计快照与命令熔断作用域。
+     */
+    private static final ExecutorService SUBSCRIBE_EXECUTOR = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = new Thread(runnable, "subagent-dispatch");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    /** 订阅调度器：被调度的任务在<b>提交该任务的线程</b>上快照上下文，执行线程内恢复、结束还原 */
+    private static final Scheduler SUBSCRIBE_SCHEDULER = Schedulers.from(
+            (Executor) command -> SUBSCRIBE_EXECUTOR.execute(
+                    AgentTaskContextPropagator.captureCurrent(command)));
 
     private final AgentCatalog agentCatalog;
     private final CustomRunnerFactory runnerFactory;
@@ -76,10 +106,22 @@ public class SubAgentDispatchService {
     /**
      * 执行单个任务并原地回写状态（成功 → COMPLETED/result；失败 → FAILED/error；attempts 记录实际尝试次数）。
      *
+     * <p>执行期绑定 {@link AgentTaskContextPropagator} 作用域：审计 userId / 连接上下文可被子智能体
+     * 及其工具读取，命令熔断也按"本任务所属会话/智能体"隔离。调用方（编排器）已在线程池边界包装过时，
+     * 这里是幂等的覆盖 + 还原。
+     *
      * @param context 派发上下文（appName / 父智能体名 / 终端会话）
      * @param task    任务（含 agentName、request、超时与重试配置）
      */
     public void execute(AgentExecutionContext context, DynamicTask task) {
+        try (AgentTaskContextPropagator.Scope ignored =
+                     AgentTaskContextPropagator.bind(context, task.getAgentName())) {
+            doExecute(context, task);
+        }
+    }
+
+    /** 真正的执行逻辑（与上下文绑定解耦，便于单测与后续替换） */
+    private void doExecute(AgentExecutionContext context, DynamicTask task) {
         task.setStatus(TaskStatus.RUNNING);
 
         BaseAgent agent = agentCatalog.find(context.getAppName(), task.getAgentName())
@@ -124,33 +166,68 @@ public class SubAgentDispatchService {
                 Content content = Content.fromParts(Part.fromText(task.getRequest()));
                 // 边收边发：子智能体的事件既用于收敛结论，也实时翻译成步骤上报给前端
                 // （旧实现 toList().blockingGet() 把事件一次吃光，界面上看不到子智能体做了什么）
-                List<Event> events = new ArrayList<>();
-                runner.runAsync(SUBAGENT_USER_ID, sessionId, content,
-                                RunConfig.builder().autoCreateSession(true).build())
-                        .timeout(timeoutSeconds, TimeUnit.SECONDS)
-                        .blockingForEach(event -> {
-                            events.add(event);
-                            reportChildEvent(context, event, stepId, agent.name());
-                        });
+                List<Event> events = Collections.synchronizedList(new ArrayList<>());
+                CountDownLatch finished = new CountDownLatch(1);
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+                Disposable disposable = null;
+                try {
+                    // 订阅放到 SUBSCRIBE_SCHEDULER：本线程只负责等信号。这样"等超时"与"上游执行"在不同
+                    // 线程上，超时才能通过 dispose() 真正取消上游（若同步订阅，本线程会被流卡住，超时形同虚设）。
+                    // 该调度器带上下文包装：执行线程上恢复父审计快照与命令熔断作用域，结束后还原池线程原值，
+                    // 因此子智能体及其 SSH 工具读到的仍是父上下文的 userId / connectionId。
+                    disposable = runner.runAsync(SUBAGENT_USER_ID, sessionId, content,
+                                    RunConfig.builder().autoCreateSession(true).build())
+                            .subscribeOn(SUBSCRIBE_SCHEDULER)
+                            .subscribe(event -> {
+                                        events.add(event);
+                                        reportChildEvent(context, event, stepId, agent.name());
+                                    },
+                                    error -> {
+                                        failure.set(error);
+                                        finished.countDown();
+                                    },
+                                    finished::countDown);
 
-                String result = SubAgentResultExtractor.pickFinalText(events);
-                if (result.isBlank()) {
-                    // 结果为空 = 模型没给出结论：不重试（变更类任务重跑有副作用），直接失败让父智能体决策
-                    task.setStatus(TaskStatus.FAILED);
-                    task.setError("empty sub agent result");
-                    reportTaskFinished(context, task, stepId, false);
-                    log.warn("子Agent结果为空 | agent={} | task={} | events={}",
-                            task.getAgentName(), task.getTaskId(), events.size());
+                    if (!finished.await(timeoutSeconds, TimeUnit.SECONDS)) {
+                        disposable.dispose();
+                        log.warn("子Agent执行超时，已取消上游 | agent={} | task={} | attempt={}/{} | timeout={}s | sessionId={}",
+                                task.getAgentName(), task.getTaskId(), attempt, maxAttempts, timeoutSeconds, sessionId);
+                        throw new IllegalStateException(
+                                "子Agent执行超时（timeout=" + timeoutSeconds + "s）：已取消上游执行");
+                    }
+
+                    Throwable streamError = failure.get();
+                    if (streamError != null) {
+                        throw new IllegalStateException("子Agent执行失败：" + streamError.getMessage(), streamError);
+                    }
+
+                    String result = SubAgentResultExtractor.pickFinalText(events);
+                    if (result.isBlank()) {
+                        // 结果为空 = 模型没给出结论：不重试（变更类任务重跑有副作用），直接失败让父智能体决策
+                        task.setStatus(TaskStatus.FAILED);
+                        task.setError("empty sub agent result");
+                        reportTaskFinished(context, task, stepId, false);
+                        log.warn("子Agent结果为空 | agent={} | task={} | events={}",
+                                task.getAgentName(), task.getTaskId(), events.size());
+                        return;
+                    }
+
+                    task.setResult(result);
+                    task.setStatus(TaskStatus.COMPLETED);
+                    reportTaskFinished(context, task, stepId, true);
+                    log.info("子Agent执行完成 | agent={} | task={} | attempts={} | 耗时={}ms | resultLength={}",
+                            task.getAgentName(), task.getTaskId(), attempt,
+                            System.currentTimeMillis() - startedAt, result.length());
                     return;
+                } catch (InterruptedException interrupted) {
+                    // 被外层取消（线程池关闭 / 调用方中断）：恢复中断标记并退出，不留悬挂订阅
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("子Agent执行被中断", interrupted);
+                } finally {
+                    if (disposable != null && !disposable.isDisposed()) {
+                        disposable.dispose();
+                    }
                 }
-
-                task.setResult(result);
-                task.setStatus(TaskStatus.COMPLETED);
-                reportTaskFinished(context, task, stepId, true);
-                log.info("子Agent执行完成 | agent={} | task={} | attempts={} | 耗时={}ms | resultLength={}",
-                        task.getAgentName(), task.getTaskId(), attempt,
-                        System.currentTimeMillis() - startedAt, result.length());
-                return;
             } catch (Exception e) {
                 if (attempt < maxAttempts) {
                     long backoff = Math.min(MAX_BACKOFF_SECONDS, 1L << Math.min(attempt, 5));
