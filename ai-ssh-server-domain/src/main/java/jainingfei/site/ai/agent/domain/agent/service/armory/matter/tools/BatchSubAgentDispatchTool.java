@@ -61,13 +61,29 @@ public class BatchSubAgentDispatchTool extends BaseTool {
                                      DynamicAgentOrchestrator orchestrator,
                                      PlanParser planParser,
                                      PlanValidator planValidator) {
-        super("dispatchSubAgents", "批量派发多个已配置子Agent：只在一轮里存在 2 个以上相互独立、"
-                + "且每个都需要多轮排查/隔离上下文的任务时才用；单条命令或少量检查请自己 executeCommand。"
-                + "支持任务依赖、并行执行与结果汇总");
+        super("dispatchSubAgents", buildDescription(allowedAgents));
         this.allowedAgents = List.copyOf(allowedAgents);
         this.orchestrator = orchestrator;
         this.planParser = planParser;
         this.planValidator = planValidator;
+    }
+
+    /**
+     * 工具描述：真实测试里模型第一轮把 {@code agentName} 写成 {@code agent}/{@code id}
+     * （浪费一个回合等校验报错后才知道字段名），所以把可选值和一段参数示例直接写进描述，
+     * 让模型第一次调用就带对字段。
+     */
+    private static String buildDescription(List<String> allowedAgents) {
+        String agents = (allowedAgents == null || allowedAgents.isEmpty())
+                ? "（父智能体未声明子智能体）"
+                : String.join(" / ", allowedAgents);
+        String sampleAgent = (allowedAgents == null || allowedAgents.isEmpty()) ? "子智能体名" : allowedAgents.get(0);
+        return "批量派发多个已配置子Agent：只在一轮里存在 2 个以上相互独立、且每个都需要多轮排查/隔离上下文的任务时才用；"
+                + "单条命令或少量检查请自己 executeCommand。agentName 可选值：" + agents + "。"
+                + "参数示例：{\"tasks\":[{\"taskId\":\"cpu\",\"agentName\":\"" + sampleAgent
+                + "\",\"request\":\"只读排查 CPU 负载来源\"},{\"taskId\":\"mem\",\"agentName\":\"" + sampleAgent
+                + "\",\"request\":\"只读排查内存占用大户\"}],\"maxConcurrency\":2,\"failFast\":false}。"
+                + "不要用 id/agent 等其它字段名。支持任务依赖、并行执行与结果汇总";
     }
 
     /** 函数签名：tasks 数组（每项含 agentName+request 必填，可选依赖/超时）+ 可选并发与 failFast */

@@ -75,7 +75,15 @@ public class CommandGuard {
      * shell 语法上。误报时模型会收到明确提示：需要变更请派发执行型子智能体或由用户手动操作。
      *
      * <p><b>注意</b>：这是应用层护栏，不是 OS 沙箱——{@code python -c "open(...)"}、
-     * {@code find -exec} 内的写操作等长尾无法穷举，真正的强隔离应落在 SSH 账号权限（只读账号）上。
+     * {@code find -exec} 内的写操作等长尾无法穷举，真正的强隔离应落在 SSH 账号权限（只读账号）上。</p>
+     *
+     * <p><b>误杀修正</b>（真实服务器端到端测试发现）：
+     * <ul>
+     *   <li>输出重定向正则不能把文本箭头 {@code ->} / {@code =>} 当重定向——{@code find -printf '%p -> %l'}、
+     *       {@code docker inspect --format '{{.Source}} -> {{.Destination}}'} 会被误拦；</li>
+     *   <li>防火墙类命令要区分查询与变更：{@code iptables -L/-S}、{@code nft list}、{@code ufw status}、
+     *       {@code firewall-cmd --list-*} 是只读诊断，只有带变更参数才算写。</li>
+     * </ul>
      */
     private static final Pattern[] MUTATING_PATTERNS = {
             // 文件系统变更
@@ -96,8 +104,17 @@ public class CommandGuard {
             // 磁盘/挂载/分区/定时任务
             Pattern.compile("(?:^|[\\s;&|(\"'`])(?:mount|umount|swapon|swapoff|fdisk|parted|mkfs|mkfs\\.[a-z0-9]+|lvcreate|lvremove|vgcreate|vgremove|mdadm|crontab|at)(?=\\s|$)",
                     Pattern.CASE_INSENSITIVE),
-            // 用户/权限/防火墙
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:useradd|userdel|usermod|groupadd|groupdel|passwd|chpasswd|visudo|iptables|ip6tables|nft|ufw|firewall-cmd)(?=\\s|$)",
+            // 用户/权限
+            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:useradd|userdel|usermod|groupadd|groupdel|passwd|chpasswd|visudo)(?=\\s|$)",
+                    Pattern.CASE_INSENSITIVE),
+            // 防火墙：只放行"查询类"用法，变更类参数才算写（一轮实测误杀修正：iptables -L 被整条拦掉）
+            // 注意这里必须大小写敏感：iptables 的 -n/-f/-x/-z 是查询/展示选项，-N/-F/-X/-Z 才是变更
+            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:iptables|ip6tables)\\b[^;&|\\n]*(?:-A\\b|--append|-D\\b|--delete|-I\\b|--insert|-R\\b|--replace|-P\\b|--policy|-N\\b|--new-chain|-X\\b|--delete-chain|-F\\b|--flush|-Z\\b|--zero|-E\\b|--rename-chain)"),
+            Pattern.compile("(?:^|[\\s;&|(\"'`])nft\\s+(?:add|insert|delete|flush|create|rename|replace|destroy)\\b",
+                    Pattern.CASE_INSENSITIVE),
+            Pattern.compile("(?:^|[\\s;&|(\"'`])ufw\\s+(?:enable|disable|default|allow|deny|reject|limit|delete|insert|reset|reload)\\b",
+                    Pattern.CASE_INSENSITIVE),
+            Pattern.compile("(?:^|[\\s;&|(\"'`])firewall-cmd\\b[^;&|\\n]*(?:--add-|--remove-|--reload|--complete-reload|--set-|--change-|--delete-|--panic-on|--panic-off|--lockdown-on|--lockdown-off)",
                     Pattern.CASE_INSENSITIVE),
             // 容器/编排
             Pattern.compile("(?:^|[\\s;&|(\"'`])(?:docker|podman)\\s+(?:run|create|start|stop|restart|kill|rm|rmi|pull|push|build|tag|commit|exec|cp|pause|unpause|prune|volume|network)\\b",
@@ -109,8 +126,8 @@ public class CommandGuard {
                     Pattern.CASE_INSENSITIVE),
             // find 的删除动作
             Pattern.compile("(?:^|\\s)-delete\\b", Pattern.CASE_INSENSITIVE),
-            // 输出重定向写文件（排除 2>&1、>&2、>/dev/null 与数字比较）
-            Pattern.compile("(?:^|[^<>])>{1,2}\\s*(?!&|/dev/null\\b|[0-9])"),
+            // 输出重定向写文件（排除 2>&1、>&2、>/dev/null、数字比较，以及 -> / => 这类文本箭头）
+            Pattern.compile("(?<![-<>=])>{1,2}\\s*(?!&|/dev/null\\b|[0-9])"),
             // 下载落盘 / 上传 / 发变更请求
             Pattern.compile("(?:^|[\\s;&|(\"'`])(?:curl|wget)\\b[^;&|\\n]*(?:\\s-o\\b|\\s-O\\b|--output|--remote-name|--upload-file|\\s-T\\b|\\s-X\\s*(?:POST|PUT|DELETE|PATCH)|--data|-d\\s|--form|-F\\s)",
                     Pattern.CASE_INSENSITIVE)

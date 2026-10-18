@@ -220,6 +220,40 @@ public class CommandGuardTest {
         assertFalse(guard.isMutating("ls 2>/dev/null"));
         assertFalse(guard.isMutating("cmd >&2"));
         assertFalse(guard.isMutating("[ 3 -gt 2 ]"), "数字比较不是重定向");
+        // 文本箭头不是重定向（真实测试中被误拦：find -printf / docker inspect --format）
+        assertFalse(guard.isMutating("find /proc/1/fd -lname '*deleted*' -printf '%p -> %l\\n'"));
+        assertFalse(guard.isMutating("docker inspect redis --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'"));
+        assertFalse(guard.isMutating("ls -l | awk '{print $1\" => \"$9}'"));
+        // 防火墙查询类命令是只读诊断
+        assertFalse(guard.isMutating("iptables -L INPUT -n"));
+        assertFalse(guard.isMutating("iptables -t nat -L -n --line-numbers"));
+        assertFalse(guard.isMutating("iptables -S"));
+        assertFalse(guard.isMutating("ip6tables -L INPUT -n"));
+        assertFalse(guard.isMutating("nft list ruleset"));
+        assertFalse(guard.isMutating("ufw status verbose"));
+        assertFalse(guard.isMutating("firewall-cmd --list-all"));
+        assertFalse(guard.isMutating("firewall-cmd --state"));
+    }
+
+    @Test
+    @DisplayName("isMutating：防火墙变更与真实重定向仍然拦截")
+    public void test_mutating_firewall_and_redirect_still_blocked() {
+        assertTrue(guard.isMutating("iptables -A INPUT -p tcp --dport 80 -j ACCEPT"));
+        assertTrue(guard.isMutating("iptables -I INPUT 1 -s 1.2.3.4 -j DROP"));
+        assertTrue(guard.isMutating("iptables -F"));
+        assertTrue(guard.isMutating("ip6tables -P INPUT DROP"));
+        assertTrue(guard.isMutating("nft add rule inet filter input tcp dport 80 accept"));
+        assertTrue(guard.isMutating("nft flush ruleset"));
+        assertTrue(guard.isMutating("ufw allow 22/tcp"));
+        assertTrue(guard.isMutating("ufw disable"));
+        assertTrue(guard.isMutating("firewall-cmd --add-port=80/tcp --permanent"));
+        assertTrue(guard.isMutating("firewall-cmd --reload"));
+        // 重定向本身照旧拦截
+        assertTrue(guard.isMutating("echo x > /tmp/a"));
+        assertTrue(guard.isMutating("echo x >> /var/log/y"));
+        assertTrue(guard.isMutating("awk '$3==1{print}' /proc/diskstats > /tmp/.d1"));
+        assertTrue(guard.isMutating("cmd 2>/tmp/err"));
+        assertTrue(guard.isMutating("date &> /tmp/x"));
     }
 
     @Test
