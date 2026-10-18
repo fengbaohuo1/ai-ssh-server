@@ -20,19 +20,20 @@ public class AppException extends RuntimeException {
     }
 
     public AppException(String code, Throwable cause) {
+        super(cause);
         this.code = code;
-        super.initCause(cause);
     }
 
     public AppException(String code, String message) {
+        super(message);
         this.code = code;
         this.info = message;
     }
 
     public AppException(String code, String message, Throwable cause) {
+        super(message, cause);
         this.code = code;
         this.info = message;
-        super.initCause(cause);
     }
 
     @Override

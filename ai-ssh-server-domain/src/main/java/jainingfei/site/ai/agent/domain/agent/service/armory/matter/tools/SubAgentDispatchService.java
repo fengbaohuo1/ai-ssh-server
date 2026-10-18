@@ -212,12 +212,12 @@ public class SubAgentDispatchService {
                         return;
                     }
 
-                    task.setResult(result);
+                    task.setResult(SubAgentResultExtractor.appendCommandTrace(result, events));
                     task.setStatus(TaskStatus.COMPLETED);
                     reportTaskFinished(context, task, stepId, true);
                     log.info("子Agent执行完成 | agent={} | task={} | attempts={} | 耗时={}ms | resultLength={}",
                             task.getAgentName(), task.getTaskId(), attempt,
-                            System.currentTimeMillis() - startedAt, result.length());
+                            System.currentTimeMillis() - startedAt, task.getResult().length());
                     return;
                 } catch (InterruptedException interrupted) {
                     // 被外层取消（线程池关闭 / 调用方中断）：恢复中断标记并退出，不留悬挂订阅

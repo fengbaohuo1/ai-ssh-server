@@ -17,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -28,7 +29,7 @@ import java.util.Map;
  *   <li>助手文本逐条落库 + 结论记忆提取（2-8；AiCallNode 按"一次 LLM 调用一段"收集）</li>
  *   <li>发送 done SSE 事件并关闭 emitter（同步 chat 走内部 emitter，文本经 result 返回）</li>
  *   <li>组装最终 ReActResultDTO（content/统计/stopReason/error）</li>
- *   <li>清理：终端解绑、工具结果缓存清理</li>
+ *   <li>清理：步骤出口解绑、domain 会话上下文清理（SSH 绑定跨回合保留）</li>
  * </ol>
  */
 @Slf4j
@@ -59,6 +60,10 @@ public class UserFeedbackNode extends AbstractAIAgentReActSupport {
             // 2. 组装最终结果
             ReActResultDTO result = buildFinalResult(ctx);
             ctx.setResult(result);
+
+            // 2.5 兜底补发悬挂工具步：Runner 在回合收口前漏发最后一条 FunctionResponse 时，
+            //     前端卡片会永远 running、下一回合也会误判"调用还没回来"，这里补一条失败态结果
+            completeDanglingToolSteps(ctx, emitter);
 
             // 3. 收口三连：错误可见 → usage 统计 → done（带 stopReason）
             //    错误必须在 done 之前发：前端是拿 done 收尾的，先收尾再看错误就晚了
@@ -105,6 +110,36 @@ public class UserFeedbackNode extends AbstractAIAgentReActSupport {
     // ═══════════════════════════════════════════════════════════════
     //  辅助方法
     // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * 回合收口时补发"已开始但没有结果事件"的工具步骤。
+     *
+     * <p>背景（真实测试暴露）：ADK Runner 在回合结束时可能少发最后一条 FunctionResponse
+     * （超时取消 / 事件丢失 / 异常收尾），SSE 里那张工具卡片就永远停在 running，
+     * 前端既有悬空步骤，下一回合模型也无从判断该调用是否执行过。这里 drain 出悬挂步骤，
+     * 逐条补发 success=false 的结果事件（并在日志留下 id + 工具名，便于定位漏发原因）。
+     */
+    private void completeDanglingToolSteps(DefaultReActFactory.DynamicContext ctx, SseEmitter emitter) {
+        List<DefaultReActFactory.DynamicContext.UnfinishedStep> dangling = ctx.drainUnfinishedSteps();
+        if (dangling.isEmpty()) {
+            return;
+        }
+        StringBuilder ids = new StringBuilder();
+        for (DefaultReActFactory.DynamicContext.UnfinishedStep step : dangling) {
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("success", false);
+            response.put("error", "工具调用在回合结束前未返回结果（可能执行超时、被取消，或上游事件丢失）；"
+                    + "本轮结果不含该调用的输出，如需该信息请重新执行。");
+            response.put("finishReason", "missing_result");
+            sendToolResultEvent(emitter, step.id(), step.name(), response, false, step.elapsedMs());
+            if (ids.length() > 0) {
+                ids.append(", ");
+            }
+            ids.append(step.name()).append('#').append(step.id()).append("(").append(step.elapsedMs()).append("ms)");
+        }
+        log.warn("回合收口补发未返回结果的工具步骤 | sessionId={} | count={} | steps=[{}]",
+                ctx.getSessionId(), dangling.size(), ids);
+    }
 
     private ReActResultDTO buildFinalResult(DefaultReActFactory.DynamicContext ctx) {
         String stopReason = ctx.getStopReason();

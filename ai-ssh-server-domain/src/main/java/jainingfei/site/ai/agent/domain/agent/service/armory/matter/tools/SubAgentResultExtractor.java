@@ -4,7 +4,10 @@ import com.google.adk.events.Event;
 import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
 import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 子智能体结果收敛器——把一次子会话的事件流压成"给父智能体看的那段结论"（教程 2-10 的结果收敛环节）。
@@ -67,5 +70,130 @@ public final class SubAgentResultExtractor {
             }
         }
         return "";
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  执行痕迹（减少父智能体重复执行子任务）
+    // ═══════════════════════════════════════════════════════════════
+
+    /** 执行痕迹最多回灌的工具调用条数（再多也没有信息增量，只会挤占父上下文） */
+    public static final int MAX_TRACE_CALLS = 15;
+
+    /** 执行痕迹整体字符预算（结论正文另有 12k 预算，痕迹只做"补证据"用） */
+    public static final int MAX_TRACE_CHARS = 1_500;
+
+    /** 痕迹里单条命令/参数的字符上限 */
+    public static final int MAX_TRACE_ITEM_CHARS = 120;
+
+    /** 痕迹段标题（父提示词里会引用这句，改文案要同步改模板说明） */
+    public static final String TRACE_HEADER = "[子智能体执行痕迹]";
+
+    /**
+     * 在子智能体结论后追加"它执行过哪些工具调用、结果如何"的紧凑清单。
+     *
+     * <p>背景（真实测试暴露）：父智能体只拿到子智能体的一段总结，无法判断哪些命令已经跑过，
+     * 于是常常自己把同样的命令再跑一遍（重复执行、浪费回合与时间）。痕迹清单只列
+     * 工具名 + 命令/参数摘要 + 成败，父智能体据此就能跳过重复调用。
+     *
+     * @param finalText 已收敛的结论文本（可为空）
+     * @param events    子会话事件流
+     * @return 结论 + 痕迹（整体仍受 {@link #MAX_RESULT_CHARS} head/tail 预算约束）
+     */
+    public static String appendCommandTrace(String finalText, List<Event> events) {
+        String trace = commandTrace(events);
+        if (trace.isEmpty()) {
+            return finalText == null ? "" : finalText;
+        }
+        String text = finalText == null ? "" : finalText;
+        String combined = text.isBlank() ? trace : text + "\n\n" + trace;
+        // 痕迹放在尾部：head/tail 裁剪会保留尾部，结论中段被压缩时痕迹依然完整
+        return TextRetentionUtil.retainHeadTail(combined, MAX_RESULT_CHARS + MAX_TRACE_CHARS);
+    }
+
+    /** 生成执行痕迹段（无工具调用时返回空串） */
+    public static String commandTrace(List<Event> events) {
+        if (events == null || events.isEmpty()) {
+            return "";
+        }
+        List<EventTextUtil.ToolCallView> calls = new ArrayList<>();
+        Map<String, EventTextUtil.ToolResultView> results = new LinkedHashMap<>();
+        for (Event event : events) {
+            if (event == null) {
+                continue;
+            }
+            calls.addAll(EventTextUtil.functionCalls(event));
+            for (EventTextUtil.ToolResultView result : EventTextUtil.functionResponses(event)) {
+                results.put(result.id() == null ? "" : result.id(), result);
+            }
+        }
+        if (calls.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder(TRACE_HEADER)
+                .append("（父智能体可据此判断哪些命令已经执行过；已成功且结果够用的不要再重复执行）共 ")
+                .append(calls.size()).append(" 条，列前 ").append(Math.min(calls.size(), MAX_TRACE_CALLS))
+                .append(" 条：\n");
+        int shown = 0;
+        for (EventTextUtil.ToolCallView call : calls) {
+            if (shown >= MAX_TRACE_CALLS) {
+                break;
+            }
+            EventTextUtil.ToolResultView result = results.get(call.id() == null ? "" : call.id());
+            sb.append("- ").append(call.name()).append(": ").append(summarizeArgs(call.args()));
+            if (result == null) {
+                sb.append(" → 未返回结果");
+            } else if (Boolean.FALSE.equals(result.response().get("success"))) {
+                sb.append(" → 失败");
+                String error = firstNonBlank(
+                        str(result.response().get("error")),
+                        str(result.response().get("output")));
+                if (!error.isBlank()) {
+                    sb.append(": ").append(clip(error, 80));
+                }
+            } else {
+                sb.append(" → 成功");
+                Object exitStatus = result.response().get("exitStatus");
+                if (exitStatus != null) {
+                    sb.append("(exit=").append(exitStatus).append(')');
+                }
+            }
+            sb.append('\n');
+            shown++;
+        }
+        if (calls.size() > shown) {
+            sb.append("（其余 ").append(calls.size() - shown).append(" 条已省略）\n");
+        }
+        String trace = sb.toString().trim();
+        return trace.length() > MAX_TRACE_CHARS ? clip(trace, MAX_TRACE_CHARS) + " …（痕迹已截断）" : trace;
+    }
+
+    /** 工具参数摘要：优先 command 字段（SSH 工具都带它），否则回退整个参数 Map */
+    private static String summarizeArgs(Map<String, Object> args) {
+        if (args == null || args.isEmpty()) {
+            return "(无参数)";
+        }
+        Object command = args.get("command");
+        String raw = command != null ? str(command) : str(args);
+        return clip(raw.replace('\n', ' ').trim(), MAX_TRACE_ITEM_CHARS);
+    }
+
+    private static String str(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.replace('\n', ' ').trim();
+            }
+        }
+        return "";
+    }
+
+    private static String clip(String text, int max) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() <= max ? text : text.substring(0, max) + "…";
     }
 }

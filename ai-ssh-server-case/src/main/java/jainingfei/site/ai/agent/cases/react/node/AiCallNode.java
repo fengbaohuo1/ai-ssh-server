@@ -384,7 +384,7 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
         List<EventTextUtil.ToolCallView> calls = EventTextUtil.functionCalls(event);
         for (EventTextUtil.ToolCallView call : calls) {
             ctx.incrementToolCallCount();
-            ctx.markStepStarted(call.id());
+            ctx.markStepStarted(call.id(), call.name());
             log.info("模型请求工具: {} args={}", call.name(), call.args());
             sendToolCallEvent(ctx.getEmitter(), call.id(), call.name(), call.args(), null, null);
         }

@@ -118,6 +118,10 @@ public class DefaultReActFactory {
         @Builder.Default
         private Map<String, Long> stepStartedAt = new ConcurrentHashMap<>();
 
+        /** 步骤显示名（步骤 id → 工具名），回合收口时补发"未返回结果"的合成结果用 */
+        @Builder.Default
+        private Map<String, String> stepNames = new ConcurrentHashMap<>();
+
         /** 本回合累计输入 token（一次 LLM 调用一条 usageMetadata，回合内求和） */
         @Builder.Default
         private long usagePromptTokens = 0;
@@ -166,8 +170,17 @@ public class DefaultReActFactory {
 
         /** 记录步骤开始时间（同一 id 只在首次记录，避免并发下互相覆盖） */
         public void markStepStarted(String stepId) {
-            if (stepId != null && !stepId.isEmpty()) {
-                stepStartedAt.putIfAbsent(stepId, System.currentTimeMillis());
+            markStepStarted(stepId, null);
+        }
+
+        /** 记录步骤开始时间与显示名（结果事件按 id 配对后一起清理） */
+        public void markStepStarted(String stepId, String stepName) {
+            if (stepId == null || stepId.isEmpty()) {
+                return;
+            }
+            stepStartedAt.putIfAbsent(stepId, System.currentTimeMillis());
+            if (stepName != null && !stepName.isBlank()) {
+                stepNames.putIfAbsent(stepId, stepName);
             }
         }
 
@@ -176,8 +189,35 @@ public class DefaultReActFactory {
             if (stepId == null || stepId.isEmpty()) {
                 return null;
             }
+            stepNames.remove(stepId);
             Long startedAt = stepStartedAt.remove(stepId);
             return startedAt == null ? null : System.currentTimeMillis() - startedAt;
+        }
+
+        /**
+         * 取出"已开始但始终没有收到结果事件"的工具步骤，并从记录中清除。
+         *
+         * <p>ADK Runner 在回合结束、超时被取消或异常收尾时，可能漏发最后一条
+         * FunctionResponse；前端会永远把那张工具卡片显示成 running，下一回合的模型也
+         * 无法判断这次调用到底有没有执行。回合收口节点用本方法兜底补发失败态结果。
+         */
+        public List<UnfinishedStep> drainUnfinishedSteps() {
+            List<UnfinishedStep> unfinished = new ArrayList<>();
+            long now = System.currentTimeMillis();
+            for (String stepId : new ArrayList<>(stepStartedAt.keySet())) {
+                Long startedAt = stepStartedAt.remove(stepId);
+                if (startedAt == null) {
+                    continue;
+                }
+                String name = stepNames.remove(stepId);
+                unfinished.add(new UnfinishedStep(stepId, name == null || name.isBlank() ? "unknown" : name,
+                        Math.max(0L, now - startedAt)));
+            }
+            return unfinished;
+        }
+
+        /** 悬挂步骤（id / 显示名 / 已等待毫秒） */
+        public record UnfinishedStep(String id, String name, long elapsedMs) {
         }
 
         /** 累加一次 LLM 调用的 usage（聚合事件携带；无 usageMetadata 的事件直接跳过） */

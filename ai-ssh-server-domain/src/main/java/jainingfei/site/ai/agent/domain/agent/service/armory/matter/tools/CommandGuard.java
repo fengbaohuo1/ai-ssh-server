@@ -84,52 +84,76 @@ public class CommandGuard {
      *   <li>防火墙类命令要区分查询与变更：{@code iptables -L/-S}、{@code nft list}、{@code ufw status}、
      *       {@code firewall-cmd --list-*} 是只读诊断，只有带变更参数才算写。</li>
      * </ul>
+     *
+     * <p><b>命令起始锚定</b>（第二次真实端到端测试发现）：原来的前缀 {@code (?:^|[\s;&|("'`])}
+     * 把<b>任意空白</b>都当成命令边界，于是作为参数/普通文本出现的动词也被判成写操作——
+     * {@code last reboot}、{@code grep "reboot" /var/log/messages}、{@code echo "log at 10:00"}
+     * 都会在只读智能体里被误拦。现在统一用 {@link #CMD_START}：只有串首或真正的 shell 分隔符
+     * （{@code ; & | (}、换行）之后，允许前缀 {@code sudo/nohup/exec/command/time} 与
+     * {@code then/do/else}，才认为是一条命令的开头。
+     *
+     * <p>收紧后的漏拦用"间接执行"模式兜住：{@code xargs rm}、{@code find ... -exec rm}。
+     * 仍然存在长尾（{@code bash -c "rm ..."}、{@code python -c "open(...)"}），所以真正的强隔离
+     * 必须落在 SSH 账号权限上——这层只是护栏，不是沙箱。
      */
+    /**
+     * 命令起始锚点：串首或 shell 分隔符（{@code ; & | ( }、换行）之后，允许 {@code sudo/nohup/exec/command/time}
+     * 前缀与 {@code then/do/else} 这类 shell 关键字。
+     *
+     * <p>刻意<b>不</b>把引号当边界：否则 {@code grep "reboot" /var/log/messages}、
+     * {@code journalctl --since 'reboot'} 会被误判成写操作。
+     */
+    private static final String CMD_START =
+            "(?:^|[;&|(\\n])\\s*(?:(?:sudo|nohup|exec|command|time)\\s+)*(?:(?:then|do|else)\\s+)?";
+
     private static final Pattern[] MUTATING_PATTERNS = {
             // 文件系统变更
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:rm|rmdir|mv|cp|ln|touch|mkdir|truncate|shred|dd|chmod|chown|chgrp|setfacl|chattr|mknod|mkfifo|install|rsync|scp|sftp|tee)(?=\\s|$)",
+            Pattern.compile(CMD_START + "(?:rm|rmdir|mv|cp|ln|touch|mkdir|truncate|shred|dd|chmod|chown|chgrp|setfacl|chattr|mknod|mkfifo|install|rsync|scp|sftp|tee)(?![\\w-])",
+                    Pattern.CASE_INSENSITIVE),
+            // 间接执行写操作：xargs ... <写动词> / find ... -exec <写动词>（收紧起始锚点后防止漏拦）
+            Pattern.compile("(?:xargs\\s+(?:-\\S+\\s+)*|find\\b[^;&|\\n]*-exec\\s+)(?:rm|rmdir|mv|cp|ln|touch|mkdir|truncate|shred|dd|chmod|chown|chgrp|setfacl|chattr|tee|sh|bash|python3?|perl)\\b",
                     Pattern.CASE_INSENSITIVE),
             // 原地编辑：sed -i / sed -i.bak / perl -i
             Pattern.compile("\\b(?:sed|perl)\\b[^;&|\\n]*\\s-[a-zA-Z]*i[a-zA-Z]*(?:[.\\s]|$)", Pattern.CASE_INSENSITIVE),
             // 交互式编辑器（会挂起非交互会话）
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:vi|vim|nvim|nano|emacs|pico)(?=\\s|$)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile(CMD_START + "(?:vi|vim|nvim|nano|emacs|pico)(?![\\w-])", Pattern.CASE_INSENSITIVE),
             // 包管理：安装/卸载/升级
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:apt|apt-get|aptitude|yum|dnf|zypper|pacman|apk|brew|snap|pip|pip3|npm|yarn|pnpm|gem|composer)\\s+(?:install|uninstall|remove|purge|update|upgrade|add|rm|ci|reinstall|dist-upgrade|autoremove|clean)\\b",
+            Pattern.compile(CMD_START + "(?:apt|apt-get|aptitude|yum|dnf|zypper|pacman|apk|brew|snap|pip|pip3|npm|yarn|pnpm|gem|composer)\\s+(?:install|uninstall|remove|purge|update|upgrade|add|rm|ci|reinstall|dist-upgrade|autoremove|clean)\\b",
                     Pattern.CASE_INSENSITIVE),
             // 服务/进程/系统状态变更
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:systemctl|service|supervisorctl)\\s+(?:start|stop|restart|reload|try-restart|force-reload|enable|disable|mask|unmask|kill|daemon-reload|set-property|set-default)\\b",
+            Pattern.compile(CMD_START + "(?:systemctl|service|supervisorctl)\\s+(?:start|stop|restart|reload|try-restart|force-reload|enable|disable|mask|unmask|kill|daemon-reload|set-property|set-default)\\b",
                     Pattern.CASE_INSENSITIVE),
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:kill|killall|pkill|xkill|renice|shutdown|reboot|halt|poweroff|telinit|init)(?=\\s|$)",
+            Pattern.compile(CMD_START + "(?:kill|killall|pkill|xkill|renice|shutdown|reboot|halt|poweroff|telinit|init)(?![\\w-])",
                     Pattern.CASE_INSENSITIVE),
             // 磁盘/挂载/分区/定时任务
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:mount|umount|swapon|swapoff|fdisk|parted|mkfs|mkfs\\.[a-z0-9]+|lvcreate|lvremove|vgcreate|vgremove|mdadm|crontab|at)(?=\\s|$)",
+            Pattern.compile(CMD_START + "(?:mount|umount|swapon|swapoff|fdisk|parted|mkfs|mkfs\\.[a-z0-9]+|lvcreate|lvremove|vgcreate|vgremove|mdadm|crontab|at)(?![\\w-])",
                     Pattern.CASE_INSENSITIVE),
             // 用户/权限
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:useradd|userdel|usermod|groupadd|groupdel|passwd|chpasswd|visudo)(?=\\s|$)",
+            Pattern.compile(CMD_START + "(?:useradd|userdel|usermod|groupadd|groupdel|passwd|chpasswd|visudo)(?![\\w-])",
                     Pattern.CASE_INSENSITIVE),
             // 防火墙：只放行"查询类"用法，变更类参数才算写（一轮实测误杀修正：iptables -L 被整条拦掉）
             // 注意这里必须大小写敏感：iptables 的 -n/-f/-x/-z 是查询/展示选项，-N/-F/-X/-Z 才是变更
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:iptables|ip6tables)\\b[^;&|\\n]*(?:-A\\b|--append|-D\\b|--delete|-I\\b|--insert|-R\\b|--replace|-P\\b|--policy|-N\\b|--new-chain|-X\\b|--delete-chain|-F\\b|--flush|-Z\\b|--zero|-E\\b|--rename-chain)"),
-            Pattern.compile("(?:^|[\\s;&|(\"'`])nft\\s+(?:add|insert|delete|flush|create|rename|replace|destroy)\\b",
+            Pattern.compile(CMD_START + "(?:iptables|ip6tables)\\b[^;&|\\n]*(?:-A\\b|--append|-D\\b|--delete|-I\\b|--insert|-R\\b|--replace|-P\\b|--policy|-N\\b|--new-chain|-X\\b|--delete-chain|-F\\b|--flush|-Z\\b|--zero|-E\\b|--rename-chain)"),
+            Pattern.compile(CMD_START + "nft\\s+(?:add|insert|delete|flush|create|rename|replace|destroy)\\b",
                     Pattern.CASE_INSENSITIVE),
-            Pattern.compile("(?:^|[\\s;&|(\"'`])ufw\\s+(?:enable|disable|default|allow|deny|reject|limit|delete|insert|reset|reload)\\b",
+            Pattern.compile(CMD_START + "ufw\\s+(?:enable|disable|default|allow|deny|reject|limit|delete|insert|reset|reload)\\b",
                     Pattern.CASE_INSENSITIVE),
-            Pattern.compile("(?:^|[\\s;&|(\"'`])firewall-cmd\\b[^;&|\\n]*(?:--add-|--remove-|--reload|--complete-reload|--set-|--change-|--delete-|--panic-on|--panic-off|--lockdown-on|--lockdown-off)",
+            Pattern.compile(CMD_START + "firewall-cmd\\b[^;&|\\n]*(?:--add-|--remove-|--reload|--complete-reload|--set-|--change-|--delete-|--panic-on|--panic-off|--lockdown-on|--lockdown-off)",
                     Pattern.CASE_INSENSITIVE),
             // 容器/编排
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:docker|podman)\\s+(?:run|create|start|stop|restart|kill|rm|rmi|pull|push|build|tag|commit|exec|cp|pause|unpause|prune|volume|network)\\b",
+            Pattern.compile(CMD_START + "(?:docker|podman)\\s+(?:run|create|start|stop|restart|kill|rm|rmi|pull|push|build|tag|commit|exec|cp|pause|unpause|prune|volume|network)\\b",
                     Pattern.CASE_INSENSITIVE),
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:kubectl|helm)\\s+(?:apply|delete|create|edit|patch|scale|rollout|exec|cp|drain|cordon|uncordon|label|annotate|upgrade|install|uninstall)\\b",
+            Pattern.compile(CMD_START + "(?:kubectl|helm)\\s+(?:apply|delete|create|edit|patch|scale|rollout|exec|cp|drain|cordon|uncordon|label|annotate|upgrade|install|uninstall)\\b",
                     Pattern.CASE_INSENSITIVE),
             // 版本库：会改动工作区或远端
-            Pattern.compile("(?:^|[\\s;&|(\"'`])git\\s+(?:clone|pull|fetch|checkout|switch|reset|commit|push|merge|rebase|clean|stash|apply|am|cherry-pick|tag|remote\\s+(?:add|remove|set-url))\\b",
+            Pattern.compile(CMD_START + "git\\s+(?:clone|pull|fetch|checkout|switch|reset|commit|push|merge|rebase|clean|stash|apply|am|cherry-pick|tag|remote\\s+(?:add|remove|set-url))\\b",
                     Pattern.CASE_INSENSITIVE),
             // find 的删除动作
             Pattern.compile("(?:^|\\s)-delete\\b", Pattern.CASE_INSENSITIVE),
             // 输出重定向写文件（排除 2>&1、>&2、>/dev/null、数字比较，以及 -> / => 这类文本箭头）
             Pattern.compile("(?<![-<>=])>{1,2}\\s*(?!&|/dev/null\\b|[0-9])"),
             // 下载落盘 / 上传 / 发变更请求
-            Pattern.compile("(?:^|[\\s;&|(\"'`])(?:curl|wget)\\b[^;&|\\n]*(?:\\s-o\\b|\\s-O\\b|--output|--remote-name|--upload-file|\\s-T\\b|\\s-X\\s*(?:POST|PUT|DELETE|PATCH)|--data|-d\\s|--form|-F\\s)",
+            Pattern.compile(CMD_START + "(?:curl|wget)\\b[^;&|\\n]*(?:\\s-o\\b|\\s-O\\b|--output|--remote-name|--upload-file|\\s-T\\b|\\s-X\\s*(?:POST|PUT|DELETE|PATCH)|--data|-d\\s|--form|-F\\s)",
                     Pattern.CASE_INSENSITIVE)
     };
 

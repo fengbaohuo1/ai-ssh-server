@@ -82,9 +82,14 @@ public class ReadRemoteFileTool extends BaseTool {
                         : TextRetentionUtil.retainHeadTail(preview.getContent(), MAX_CONTENT_LENGTH));
                 return result;
             } catch (Exception e) {
+                // 异常信息可能为空（如 AppException 只带 info、SFTP 包装异常），不能把 null 交给模型
+                String detail = e.getMessage();
+                if (detail == null || detail.isBlank()) {
+                    detail = e.getClass().getSimpleName();
+                }
                 log.warn("[SFTP] readRemoteFile 失败 connectionId={} path={} error={}",
-                        connectionId, path, e.getMessage());
-                return error(e.getMessage());
+                        connectionId, path, detail);
+                return error("读取失败：" + detail + "（path=" + path + "）");
             }
         });
     }

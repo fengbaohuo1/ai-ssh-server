@@ -257,6 +257,38 @@ public class CommandGuardTest {
     }
 
     @Test
+    @DisplayName("isMutating：命令起始锚定——参数/文本里的动词不算写操作（真实误杀 last reboot）")
+    public void test_parameter_verbs_not_mutating() {
+        // 真实端到端测试里 last reboot 被误拦：reboot 是 last 的参数，不是命令
+        assertFalse(guard.isMutating("last reboot"));
+        assertFalse(guard.isMutating("last -x reboot"));
+        assertFalse(guard.isMutating("uptime; who -b; echo '--- last reboot ---'; last reboot | head -5"));
+        assertFalse(guard.isMutating("grep -i reboot /var/log/messages"));
+        assertFalse(guard.isMutating("journalctl --since 'reboot' -n 20"));
+        assertFalse(guard.isMutating("cat /proc/mounts"));
+        assertFalse(guard.isMutating("grep mount /etc/fstab"));
+        assertFalse(guard.isMutating("echo 'log at 10:00'"));
+        assertFalse(guard.isMutating("atq"));
+        assertFalse(guard.isMutating("grep -c 'cp ' /tmp/list.txt"));
+        assertFalse(guard.isMutating("printf '%s %s' a b"));
+        // 分隔符 / shell 关键字之后仍然算命令开头
+        assertTrue(guard.isMutating("ls && sudo reboot"));
+        assertTrue(guard.isMutating("if [ -f /x ]; then reboot; fi"));
+        assertTrue(guard.isMutating("cd /tmp; rm -rf ./build"));
+        assertTrue(guard.isMutating("sudo shutdown -h now"));
+    }
+
+    @Test
+    @DisplayName("isMutating：间接执行（xargs / find -exec）仍然拦截，收紧锚点后不漏放")
+    public void test_indirect_execution_still_blocked() {
+        assertTrue(guard.isMutating("find /tmp -name '*.log' -exec rm {} \\;"));
+        assertTrue(guard.isMutating("find /tmp -type f -exec chmod 777 {} \\;"));
+        assertTrue(guard.isMutating("ls | xargs rm -f"));
+        assertTrue(guard.isMutating("ls | xargs -I{} mv {} /tmp/"));
+        assertTrue(guard.isMutating("cat list.txt | xargs -n1 chown root"));
+    }
+
+    @Test
     @DisplayName("isMutating：null / 空白安全返回 false（空命令交给熔断处理）")
     public void test_mutating_null_and_blank() {
         assertFalse(guard.isMutating(null));
