@@ -16,8 +16,9 @@ AI + SSH 的服务端项目，提供 SSH 连接管理、远程文件系统、操
 - **配置文件写接口**：`AgentConfigFileStore`（infrastructure.config）+ `AgentConfigController`（trigger，前缀 `/api/v1/agent/config`）：
   - `agent.yml`：主配置（智能体/子智能体/MCP/技能/运行治理），读/写时做 YAML 语法 + `ai.agent.config.tables` 结构校验，写前备份 `.bak`，临时文件 + 原子替换。
   - `llm.yml`：模型配置覆盖层，只写 `ai.agent.config.tables.<tableKey>.module.chat-model` 下的键；`spring.config.import` 顺序 `agent.yml` → `llm.yml`（同名键后者覆盖），所以表单保存不会重写 agent.yml、不会丢注释。
-  - `api-key` 只写不读：GET 只回传 `apiKeyConfigured`；保存返回 `restartRequired=true`，重启后生效。
+  - `api-key` 只写不读：GET 只回传 `apiKeyConfigured`；保存成功后**立即热重装**（见下条），无需重启。
   - provider 取值唯一出处 `ProviderCapabilities`（`deepseek-native` / `openai-compatible`）；校验失败 `code=0002` + 原因。
+- **配置热重装（v3.1）**：保存 agent.yml / llm.yml 后 trigger 发布 `AgentConfigChangedEvent`（domain.agent.model.event），app 层 `AiAgentAutoConfig#onAgentConfigChanged` 同步消费：`AgentConfigFileStore.loadEffectiveProperties()` 重新读取合并后的有效配置 → 刷新 `AiAgentAutoConfigProperties` Bean（配置列表/概览随之更新）→ 重新走装配链。装配链天然支持覆盖：`registerBean` 先移除同名 Bean、`AgentCatalog.register` 覆盖登记、`CustomAdkSessionService` 共享单例，所以新对话轮次立即生效且不丢 ADK 会话；失败时保留旧装配并回传原因（`applied=false` + `applyMessage`），也可 `POST /api/v1/agent/config/reload` 手动重装。
 - **桌面打包约束**：服务端必须能以 `--spring.profiles.active=local` 零外部依赖启动（`java -jar`），客户端 `scripts/bundle-backend.ps1` 会把 jar 与 jlink JRE 打进 Tauri resources。
 - **表结构对齐**：本地 H2 与 MySQL 列级一致；v3 补齐 `chat_task_state`，存量库执行 `migration-v3.sql`（`init.sql` 已同步）。
 
