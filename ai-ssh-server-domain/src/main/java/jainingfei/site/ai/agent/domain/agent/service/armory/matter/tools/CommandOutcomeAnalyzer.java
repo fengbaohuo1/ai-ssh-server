@@ -1,15 +1,21 @@
 package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
 
+import jainingfei.site.ai.agent.domain.ssh.model.valobj.SshCommandResult;
+
 import java.util.stream.Stream;
 
 /**
- * 命令结果分析——把"一段命令输出"翻译成"成功与否 + 失败原因归类"（纯函数，无状态）。
+ * 命令结果分析——把"一次执行结果"翻译成"成功与否 + 失败原因归类"（纯函数，无状态）。
  *
  * <p>为什么不塞进工具类：这是策略而非通信——判定词表与归类话术的调整频率远高于工具本身，
  * 独立出来后可以直接单测（工具类只能靠真机冒烟验证）。
  *
- * <p>注意：这里只做"文本启发式判断"，真正的失败可能被输出伪装（例如命令自身打印 "failed"）；
- * 因此它只用于给模型提供线索，不作为系统决策依据。
+ * <p>两代判据并存：
+ * <ul>
+ *   <li>结构化（首选）：{@link #isSuccessful(SshCommandResult)} 以<b>退出码</b>为准，
+ *       超时 / 截断直接判失败。只有它能区分"命令成功但无输出"与"命令失败但 stdout 为空"</li>
+ *   <li>文本（兼容）：{@link #isSuccessful(String)} 是旧实现的启发式，只在拿不到退出码时兜底</li>
+ * </ul>
  */
 public final class CommandOutcomeAnalyzer {
 
@@ -23,6 +29,25 @@ public final class CommandOutcomeAnalyzer {
     }
 
     /**
+     * 判断结构化执行结果是否成功。
+     *
+     * <p>判据优先级：超时/截断 → 失败；有退出码 → 只有 0 算成功；
+     * 无退出码（通道异常等）→ 退化到文本启发式。
+     */
+    public static boolean isSuccessful(SshCommandResult result) {
+        if (result == null) {
+            return false;
+        }
+        if (result.isTimedOut() || result.isTruncated()) {
+            return false;
+        }
+        if (result.hasExitStatus()) {
+            return result.getExitStatus() == 0;
+        }
+        return isSuccessful(result.combinedOutput());
+    }
+
+    /**
      * 判断命令输出是否代表执行成功。
      *
      * @param output 命令输出（null / 空串视为成功——无输出不等于失败）
@@ -33,6 +58,30 @@ public final class CommandOutcomeAnalyzer {
         }
         String lower = output.toLowerCase();
         return Stream.of(FAILURE_SIGNALS).noneMatch(lower::contains);
+    }
+
+    /**
+     * 结构化结果的失败原因归类：先区分超时/截断，再按 stderr/stdout 的信号词归类。
+     */
+    public static String analyzeError(SshCommandResult result) {
+        if (result == null) {
+            return "执行失败，请检查命令和输出信息。";
+        }
+        if (result.isTimedOut()) {
+            return "命令执行超时，已被主动终止。建议改用更快/非阻塞的命令（如去掉 tail -f、加 --timeout 参数），或拆分成多步。";
+        }
+        if (result.isTruncated()) {
+            return "命令输出超过上限，已被截断。建议缩小输出范围（如 head、grep、单文件查询）后重试。";
+        }
+        String combined = result.combinedOutput();
+        String bySignal = analyzeError(combined);
+        if (bySignal != null && !bySignal.startsWith("执行失败")) {
+            return bySignal;
+        }
+        if (result.hasExitStatus() && result.getExitStatus() != 0) {
+            return "命令退出码 " + result.getExitStatus() + "，请结合 stderr 检查命令本身或环境。";
+        }
+        return bySignal;
     }
 
     /**
@@ -61,3 +110,4 @@ public final class CommandOutcomeAnalyzer {
         return "执行失败，请检查命令和输出信息。";
     }
 }
+

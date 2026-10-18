@@ -22,6 +22,14 @@ AI + SSH 的服务端项目，提供 SSH 连接管理、远程文件系统、操
 - **桌面打包约束**：服务端必须能以 `--spring.profiles.active=local` 零外部依赖启动（`java -jar`），客户端 `scripts/bundle-backend.ps1` 会把 jar 与 jlink JRE 打进 Tauri resources。
 - **表结构对齐**：本地 H2 与 MySQL 列级一致；v3 补齐 `chat_task_state`，存量库执行 `migration-v3.sql`（`init.sql` 已同步）。
 
+## v3.2 升级要点（智能体能力：派发模式 / 只读拦截 / 结构化执行）
+
+- **`delegate-mode`（子智能体派发模式）**：`AiAgentConfigTableVO.Module.Agent` 新增 `delegateMode`，取值 `hybrid`（默认）/ `dispatch-only`（空值按 hybrid）。`AgentNode#buildAgentTools` 二段式装配：第一段所有 agent 先按 leaf 工具集构建（`leafToolList`：`executeCommand` + `listRemoteFiles` + `readRemoteFile`，非只读再加 `writeRemoteFile`，包 `StaticToolset` 并合并 MCP 工具集）；第二段对声明了 `sub-agents` 的 agent 覆盖同名 Bean——`hybrid` 追加 leaf 工具 + 三个派发工具（`dispatchSubAgent` / `dispatchSubAgents` / `planAndDispatchSubAgents`），`dispatch-only` 只保留派发工具。非法取值在装配期抛 `IllegalArgumentException`（fail-fast），接口回传非法值时 `AgentRoleInfo` 的 `delegateMode` 为 null 并进"配置告警"。⚠️ 改动工具语义时必须同步 `AgentServiceController#toolsFor(orchestrator, delegateMode, readOnly)` 与客户端 `AgentConfigSidebar` 的角色徽标（可直连 / 仅派发）。
+- **`read-only` 命令级拦截**：`AgentNode` 用的 `SshExecuteAdkTool` 是 `@Scope("prototype")` bean，`AgentNode` 经 `ObjectProvider<SshExecuteAdkTool>` 取得实例并 `setReadOnly(...)`，所以每个 agent 的只读策略互不影响。`doExecute` 顺序：会话存在 → `CommandGuard.isDangerous`（危险命令）→ 只读时 `CommandGuard.isMutating`（写操作）拒绝 → `execCommandDetailed`。`isMutating` 是应用层护栏（文件变更 / 包管理 / 服务 / 权限 / 挂载 / docker/kubectl / git 写 / curl 上传），不是 OS 沙箱。
+- **SSH 执行结构化**：`SshCommandResult`（domain.ssh.model.valobj，`stdout/stderr/exitStatus/timedOut/truncated`）+ `ITerminalSessionPort#execCommandDetailed`；`UnifiedSessionManager` 用 `ChannelExec` 同时收集 stdout/stderr，循环内检查超时与输出上限；`ai.ssh.exec.timeout-seconds`（默认 300）、`ai.ssh.exec.max-output-bytes`（默认 262144）。成功判定改由 `CommandOutcomeAnalyzer.isSuccessful(SshCommandResult)` 以退出码为准，文本启发式只做兜底。
+- **派发结果治理**：`SubAgentResultExtractor.pickFinalText` 用 `TextRetentionUtil.retainHeadTail` 截到 12000 字符；`BatchSubAgentDispatchTool` 的 LLM-visible schema 已移除 `maxRetries`（内部重试/超时保留）。
+- **ReAct 回合成功判据**（case 层）：`ToolCallNode#handleIntentFeedback(..., boolean executionOk)` 以工具执行结果决定成功，不再从结果文本反推；`AiCallNode#get()` 仅在 `stopReason != null && toolResultsCollected.isEmpty()` 时跳过工具后置处理。
+
 ## v2 升级要点（安全 / 文件 / 审计 / 配置）
 
 ```mermaid

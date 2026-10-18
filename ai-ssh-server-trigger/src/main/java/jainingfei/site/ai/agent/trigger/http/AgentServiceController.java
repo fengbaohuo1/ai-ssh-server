@@ -144,9 +144,15 @@ public class AgentServiceController implements IAgentService {
                             role.setDelegates(a.getSubAgents() == null ? new ArrayList<>() : new ArrayList<>(a.getSubAgents()));
                             boolean orchestrator = ObjectUtils.isNotEmpty(a.getSubAgents());
                             boolean readOnly = Boolean.TRUE.equals(a.getReadOnly());
+                            String delegateMode = orchestrator ? resolveDelegateMode(a.getDelegateMode()) : null;
+                            if (orchestrator && delegateMode == null) {
+                                dto.getConfigWarnings().add("智能体 " + a.getName()
+                                        + " 的 delegate-mode 取值非法，装配期会失败（可选 hybrid / dispatch-only）");
+                            }
                             role.setOrchestrator(orchestrator);
+                            role.setDelegateMode(delegateMode);
                             role.setReadOnly(readOnly);
-                            role.setTools(toolsFor(orchestrator, readOnly));
+                            role.setTools(toolsFor(orchestrator, delegateMode, readOnly));
                             role.setInstructionPreview(truncate(a.getInstruction(), 600));
                             return role;
                         })
@@ -218,20 +224,42 @@ public class AgentServiceController implements IAgentService {
         return runtime;
     }
 
-    /** 按角色推导内置工具：编排者只有派发工具；执行者按 readOnly 决定是否含写入 */
-    private static List<String> toolsFor(boolean orchestrator, boolean readOnly) {
+    /** 解析派发模式：空 = hybrid；非法值返回 null（由调用方收集告警） */
+    private static String resolveDelegateMode(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return AiAgentConfigTableVO.Module.Agent.DELEGATE_MODE_HYBRID;
+        }
+        String mode = raw.trim().toLowerCase();
+        if (AiAgentConfigTableVO.Module.Agent.DELEGATE_MODE_HYBRID.equals(mode)
+                || AiAgentConfigTableVO.Module.Agent.DELEGATE_MODE_DISPATCH_ONLY.equals(mode)) {
+            return mode;
+        }
+        return null;
+    }
+
+    /**
+     * 按角色推导内置工具。
+     *
+     * <p>叶子执行者：executeCommand + 文件读取（非只读再加写入）；
+     * 编排者按 delegate-mode 区分：hybrid = 执行工具 + 派发工具，dispatch-only = 只派发。
+     */
+    private static List<String> toolsFor(boolean orchestrator, String delegateMode, boolean readOnly) {
+        boolean dispatchOnly = AiAgentConfigTableVO.Module.Agent.DELEGATE_MODE_DISPATCH_ONLY.equals(delegateMode);
+        boolean canExecuteDirectly = !orchestrator || !dispatchOnly;
+
         List<String> tools = new ArrayList<>();
+        if (canExecuteDirectly) {
+            tools.add("executeCommand");
+            tools.add("listRemoteFiles");
+            tools.add("readRemoteFile");
+            if (!readOnly) {
+                tools.add("writeRemoteFile");
+            }
+        }
         if (orchestrator) {
             tools.add("dispatchSubAgent");
             tools.add("dispatchSubAgents");
             tools.add("planAndDispatchSubAgents");
-            return tools;
-        }
-        tools.add("executeCommand");
-        tools.add("listRemoteFiles");
-        tools.add("readRemoteFile");
-        if (!readOnly) {
-            tools.add("writeRemoteFile");
         }
         return tools;
     }

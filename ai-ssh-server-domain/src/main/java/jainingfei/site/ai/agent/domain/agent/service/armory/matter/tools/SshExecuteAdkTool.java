@@ -12,6 +12,7 @@ import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
 import jainingfei.site.ai.agent.domain.security.model.valobj.enums.AuditActionEnum;
 import jainingfei.site.ai.agent.domain.security.service.IAuditService;
 import jainingfei.site.ai.agent.domain.security.support.AuditContext;
+import jainingfei.site.ai.agent.domain.ssh.model.valobj.SshCommandResult;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshTerminalService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Scope;
@@ -58,10 +59,27 @@ public class SshExecuteAdkTool extends BaseTool {
     @Resource
     private IAuditService auditService;
 
+    /**
+     * 只读策略——由装配层按智能体的 {@code read-only} 配置注入（每个智能体一个 prototype 实例）。
+     *
+     * <p>只读智能体的 executeCommand 会在命令级拦截写操作（{@link CommandGuard#isMutating}），
+     * 而不是只靠"不挂 writeRemoteFile"和提示词自觉。
+     */
+    private volatile boolean readOnly;
+
     public SshExecuteAdkTool() {
         super("executeCommand",
                 "Execute a shell command on the remote server via SSH. "
-                        + "Returns a structured result with command, output, success flag, and optional suggestion.");
+                        + "Returns a structured result with command, output, success flag, exitStatus, and optional suggestion.");
+    }
+
+    /** 装配期绑定只读策略（由 {@code AgentNode} 调用） */
+    public void setReadOnly(boolean readOnly) {
+        this.readOnly = readOnly;
+    }
+
+    public boolean isReadOnly() {
+        return readOnly;
     }
 
     /** 工具声明：参数 schema 在注册时直接注入 LlmAgent */
@@ -96,7 +114,7 @@ public class SshExecuteAdkTool extends BaseTool {
 
         if (connectionId == null || connectionId.isEmpty()) {
             log.warn("[EXEC] 未绑定 SSH 连接 → 返回提示");
-            return result(true, command, "未绑定 SSH 终端会话。请先选择一台已连接的服务器。", null);
+            return result(false, command, "未绑定 SSH 终端会话。请先选择一台已连接的服务器。", null);
         }
 
         if (command == null || command.isEmpty()) {
@@ -105,7 +123,7 @@ public class SshExecuteAdkTool extends BaseTool {
 
             if (commandGuard.isInterrupted(count)) {
                 commandGuard.resetEmptyCommands(connectionId);
-                return result(true, "",
+                return result(false, "",
                         "已中断重复调用。请直接用文字向用户说明当前情况，不要再调用 executeCommand。", null);
             }
             return result(false, "", "参数缺失：executeCommand 必须提供 command 参数。示例：command=\"ls -la\"", null);
@@ -131,12 +149,12 @@ public class SshExecuteAdkTool extends BaseTool {
         String connectionId = SshSessionBindings.connectionOf(sessionId);
         if (connectionId == null || connectionId.isEmpty()) {
             log.warn("[EXEC:public] 未绑定 SSH 连接 → 返回提示");
-            return result(true, command, "未绑定 SSH 终端会话。请先选择一台已连接的服务器。", null);
+            return result(false, command, "未绑定 SSH 终端会话。请先选择一台已连接的服务器。", null);
         }
         return doExecute(sessionId, connectionId, command);
     }
 
-    /** 共用执行体：连接存活检查 → 危险命令拦截 → 执行 → 结果组装 */
+    /** 共用执行体：连接存活检查 → 危险/只读拦截 → 执行 → 结果组装 */
     private Map<String, Object> doExecute(String sessionId, String connectionId, String command) {
         long start = System.currentTimeMillis();
         try {
@@ -156,19 +174,46 @@ public class SshExecuteAdkTool extends BaseTool {
                         null);
             }
 
-            log.info("[EXEC] 开始SSH执行: connectionId={} command={}", connectionId, command);
-            String output = sshTerminalService.execCommand(connectionId, command);
-            log.info("[EXEC] SSH执行完成: outputLength={}", output.length());
+            // 只读智能体：命令级拦截写操作（read-only 不再只是"不挂写文件工具"）
+            if (readOnly && commandGuard.isMutating(command)) {
+                log.warn("[EXEC] 只读智能体拦截写操作: connectionId={} command={}", connectionId, command);
+                auditService.record(AuditContext.userId(), connectionId, null,
+                        AuditActionEnum.COMMAND_EXECUTE, command, "只读智能体拦截写操作",
+                        null, false, System.currentTimeMillis() - start, AuditContext.clientIp());
+                return result(false, command,
+                        "⛔ 只读模式已拦截写操作: " + command
+                                + "\n当前智能体配置为 read-only，只能执行查看/诊断类命令。"
+                                + "\n需要变更时：把任务派发给执行型子智能体，或请用户手动在终端操作。",
+                        "只读智能体不允许写操作");
+            }
 
-            boolean success = CommandOutcomeAnalyzer.isSuccessful(output);
+            log.info("[EXEC] 开始SSH执行: connectionId={} command={}", connectionId, command);
+            SshCommandResult execResult = sshTerminalService.execCommandDetailed(connectionId, command);
+            String combined = execResult.combinedOutput();
+            boolean success = CommandOutcomeAnalyzer.isSuccessful(execResult);
+            log.info("[EXEC] SSH执行完成: exitStatus={} timedOut={} truncated={} outputLength={}",
+                    execResult.getExitStatus(), execResult.isTimedOut(), execResult.isTruncated(), combined.length());
+
             auditService.record(AuditContext.userId(), connectionId, null,
                     AuditActionEnum.COMMAND_EXECUTE, command,
-                    "输出 " + output.length() + " 字符", null, success,
-                    System.currentTimeMillis() - start, AuditContext.clientIp());
+                    "exit=" + execResult.getExitStatus() + ", stdout=" + execResult.getStdout().length()
+                            + ", stderr=" + execResult.getStderr().length(),
+                    null, success, System.currentTimeMillis() - start, AuditContext.clientIp());
             // head/tail 保留 + 精确省略计数：命令输出超限时模型只看到首尾（页脚提示可要求补充）
-            String boundedOutput = TextRetentionUtil.retainHeadTail(output, MAX_TOOL_OUTPUT_LENGTH);
-            return result(success, command, boundedOutput,
-                    success ? null : CommandOutcomeAnalyzer.analyzeError(output));
+            String boundedOutput = TextRetentionUtil.retainHeadTail(combined, MAX_TOOL_OUTPUT_LENGTH);
+            Map<String, Object> r = result(success, command, boundedOutput,
+                    success ? null : CommandOutcomeAnalyzer.analyzeError(execResult));
+            // 结构化字段：模型据此区分"退出码非 0 / 超时 / 输出被截断"
+            if (execResult.hasExitStatus()) {
+                r.put("exitStatus", execResult.getExitStatus());
+            }
+            if (execResult.isTimedOut()) {
+                r.put("timedOut", true);
+            }
+            if (execResult.isTruncated()) {
+                r.put("truncated", true);
+            }
+            return r;
 
         } catch (Exception e) {
             log.error("[EXEC] 异常: connectionId={} command={}", connectionId, command, e);

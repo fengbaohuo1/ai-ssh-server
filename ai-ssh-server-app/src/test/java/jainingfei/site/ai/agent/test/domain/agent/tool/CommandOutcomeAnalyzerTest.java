@@ -1,6 +1,7 @@
 package jainingfei.site.ai.agent.test.domain.agent.tool;
 
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.CommandOutcomeAnalyzer;
+import jainingfei.site.ai.agent.domain.ssh.model.valobj.SshCommandResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -20,7 +21,7 @@ public class CommandOutcomeAnalyzerTest {
     @Test
     @DisplayName("isSuccessful：null / 空输出视为成功（无输出不等于失败）")
     public void test_empty_output_is_success() {
-        assertTrue(CommandOutcomeAnalyzer.isSuccessful(null));
+        assertTrue(CommandOutcomeAnalyzer.isSuccessful((String) null));
         assertTrue(CommandOutcomeAnalyzer.isSuccessful(""));
     }
 
@@ -59,7 +60,7 @@ public class CommandOutcomeAnalyzerTest {
     @DisplayName("analyzeError：无法归类时给出通用提示；null 输入返回 null")
     public void test_analyze_error_fallback() {
         assertEquals("执行失败，请检查命令和输出信息。", CommandOutcomeAnalyzer.analyzeError("something odd happened"));
-        assertNull(CommandOutcomeAnalyzer.analyzeError(null));
+        assertNull(CommandOutcomeAnalyzer.analyzeError((String) null));
     }
 
     @Test
@@ -81,5 +82,63 @@ public class CommandOutcomeAnalyzerTest {
                 "已知盲区：纯中文报错不在英文信号词表内，会被判为成功");
         // 中英混排的常见形态则能被识别
         assertFalse(CommandOutcomeAnalyzer.isSuccessful("错误: command not found"));
+    }
+
+    // ==================== 结构化结果（退出码为准） ====================
+
+    @Test
+    @DisplayName("结构化：退出码 0 → 成功；退出码非 0 → 失败（即使输出为空/无报错词）")
+    public void test_structured_exit_status_decides() {
+        assertTrue(CommandOutcomeAnalyzer.isSuccessful(
+                SshCommandResult.builder().stdout("ok").exitStatus(0).build()));
+        // 关键回归：`false` 命令无任何输出，旧文本判据会误判成功
+        assertFalse(CommandOutcomeAnalyzer.isSuccessful(
+                SshCommandResult.builder().stdout("").exitStatus(1).build()));
+        // 有正常输出但退出码非 0（如 grep 只匹配到部分）也应以退出码为准
+        assertFalse(CommandOutcomeAnalyzer.isSuccessful(
+                SshCommandResult.builder().stdout("partial line").exitStatus(2).build()));
+    }
+
+    @Test
+    @DisplayName("结构化：超时 / 输出截断 → 失败，且错误建议可区分")
+    public void test_structured_timeout_and_truncated() {
+        SshCommandResult timeout = SshCommandResult.builder()
+                .stdout("partial").exitStatus(null).timedOut(true).build();
+        assertFalse(CommandOutcomeAnalyzer.isSuccessful(timeout));
+        assertTrue(CommandOutcomeAnalyzer.analyzeError(timeout).contains("超时"));
+
+        SshCommandResult truncated = SshCommandResult.builder()
+                .stdout("head...").exitStatus(0).truncated(true).build();
+        assertFalse(CommandOutcomeAnalyzer.isSuccessful(truncated));
+        assertTrue(CommandOutcomeAnalyzer.analyzeError(truncated).contains("截断"));
+    }
+
+    @Test
+    @DisplayName("结构化：无退出码时退化为文本启发式（兼容旧通道）")
+    public void test_structured_falls_back_to_text() {
+        assertTrue(CommandOutcomeAnalyzer.isSuccessful(
+                SshCommandResult.builder().stdout("total 0").build()));
+        assertFalse(CommandOutcomeAnalyzer.isSuccessful(
+                SshCommandResult.builder().stdout("bash: x: command not found").build()));
+    }
+
+    @Test
+    @DisplayName("结构化：stderr 并入 combinedOutput，供模型与审计看到")
+    public void test_structured_combined_output() {
+        SshCommandResult r = SshCommandResult.builder().stdout("out").stderr("err").exitStatus(1).build();
+        assertTrue(r.combinedOutput().contains("out"));
+        assertTrue(r.combinedOutput().contains("[stderr]"));
+        assertTrue(r.combinedOutput().contains("err"));
+        SshCommandResult onlyErr = SshCommandResult.builder().stdout("").stderr("boom").build();
+        assertTrue(onlyErr.combinedOutput().contains("boom"));
+        assertFalse(onlyErr.hasExitStatus());
+    }
+
+    @Test
+    @DisplayName("结构化：exitStatus 非 0 时错误建议带上退出码")
+    public void test_structured_exit_code_hint() {
+        SshCommandResult r = SshCommandResult.builder()
+                .stdout("").stderr("no such file").exitStatus(2).build();
+        assertTrue(CommandOutcomeAnalyzer.analyzeError(r).contains("退出码 2"));
     }
 }

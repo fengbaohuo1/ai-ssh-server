@@ -10,7 +10,6 @@ import jainingfei.site.ai.agent.domain.agent.service.IChatContextService;
 import jainingfei.site.ai.agent.domain.agent.service.IIntentService;
 import jainingfei.site.ai.agent.domain.agent.service.ILongTermMemoryService;
 import jainingfei.site.ai.agent.domain.agent.service.IPromptService;
-import jainingfei.site.ai.agent.domain.agent.service.intent.IntentService;
 import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
 import jianingfei.site.wrench.design.framework.tree.StrategyHandler;
 import lombok.extern.slf4j.Slf4j;
@@ -111,7 +110,9 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
 
             // 反馈回路 + 任务态打点：工具结果 → 意图重分类（修正提示下回合一次性注入）
             // → 任务步进状态机打点（成功追加留痕/失败置位/重分类换根意图，completed 由 LoopDecisionNode 收口）
-            handleIntentFeedback(sessionId, resultText, result.name(), command);
+            // 注意：这里的 success 就是"这次工具调用是否真的成功"（含结构化退出码判定），
+            // 不能再用"结果文本非空"重新推导——显式失败（如 {"success":false,"error":"..."}）文本也是非空的。
+            handleIntentFeedback(sessionId, resultText, result.name(), command, success);
         } catch (Exception e) {
             log.warn("工具副作用处理失败 sessionId={} tool={}", ctx.getSessionId(), result.name(), e);
         }
@@ -121,10 +122,12 @@ public class ToolCallNode extends AbstractAIAgentReActSupport {
      * 反馈回路（原显式循环 ToolCallNode 语义，改用会话缓存状态）+ 任务态打点。
      * <p>
      * 任务态打点不依赖会话意图是否存在（任务态按 sessionId 维护，意图识别失败也应留痕）。
+     *
+     * @param executionOk 工具调用是否成功（由结构化结果判定，唯一判据；不再从文本反推）
      */
-    private void handleIntentFeedback(String sessionId, String toolResult, String toolName, String command) {
-        boolean success = toolResult != null && !toolResult.isBlank()
-                && !IntentService.looksLikeIntentMismatch(toolResult);
+    private void handleIntentFeedback(String sessionId, String toolResult, String toolName,
+                                      String command, boolean executionOk) {
+        boolean success = executionOk;
 
         IntentResultVO lastIntent = chatContextService.getSessionIntent(sessionId);
         IntentResultVO reclassified = null;

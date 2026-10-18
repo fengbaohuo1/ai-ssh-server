@@ -2,6 +2,7 @@ package jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools;
 
 import com.google.adk.events.Event;
 import jainingfei.site.ai.agent.domain.agent.support.EventTextUtil;
+import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
 
 import java.util.List;
 
@@ -19,19 +20,31 @@ import java.util.List;
  *   <li>异常流（全是分片）：退回"最后一个有文本的事件"</li>
  *   <li>依然为空：返回空串，由调用方判定为失败（"empty sub agent result"）</li>
  * </ol>
+ *
+ * <p>长度治理：子智能体可能汇总了十几条命令的完整回显，直接塞回父上下文会挤掉后续推理空间。
+ * 结果超过 {@link #MAX_RESULT_CHARS} 时按 head/tail 保留（尾部通常是结论/报错摘要），
+ * 中段替换为带省略计数的标记，让父智能体知道被截断过。
  */
 public final class SubAgentResultExtractor {
+
+    /** 单次子智能体结果回灌父上下文的字符预算（约为叶子工具输出的 3 倍，兼顾汇总信息量） */
+    public static final int MAX_RESULT_CHARS = 12_000;
 
     private SubAgentResultExtractor() {
     }
 
     /**
-     * 提取子智能体最终结论文本（剥掉隐藏草稿标记，只保留可见正文）。
+     * 提取子智能体最终结论文本（剥掉隐藏草稿标记，只保留可见正文，超限按 head/tail 保留）。
      *
      * @param events 子会话事件流（可能为 null/空）
      * @return 结论文本；无法提取时返回空串（永不返回 null）
      */
     public static String pickFinalText(List<Event> events) {
+        return TextRetentionUtil.retainHeadTail(pickRawFinalText(events), MAX_RESULT_CHARS);
+    }
+
+    /** 未做长度裁剪的原始结论文本（供需要完整内容/测试的场景） */
+    public static String pickRawFinalText(List<Event> events) {
         if (events == null || events.isEmpty()) {
             return "";
         }

@@ -2,6 +2,7 @@ package jainingfei.site.ai.agent.domain.ssh.service.impl;
 
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.ssh.adapter.port.ITerminalSessionPort;
+import jainingfei.site.ai.agent.domain.ssh.model.valobj.SshCommandResult;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshTerminalService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -29,6 +30,12 @@ public class SshTerminalService implements ISshTerminalService {
     public String execCommand(String connectionId, String command) {
         log.debug("AI 执行命令 connectionId={} command={}", connectionId, command);
         return terminalSessionPort.execCommand(connectionId, command);
+    }
+
+    @Override
+    public SshCommandResult execCommandDetailed(String connectionId, String command) {
+        log.debug("AI 执行命令(结构化) connectionId={} command={}", connectionId, command);
+        return terminalSessionPort.execCommandDetailed(connectionId, command);
     }
 
     @Override

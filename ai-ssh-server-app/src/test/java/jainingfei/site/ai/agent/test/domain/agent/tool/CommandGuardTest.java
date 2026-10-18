@@ -148,4 +148,85 @@ public class CommandGuardTest {
         assertEquals(CommandGuard.MAX_EMPTY_CALLS, guard.onEmptyCommand(connectionId),
                 "清零后必须能再次走满阈值，熔断逻辑不是一次性的");
     }
+
+    // ===== 只读智能体的写操作识别（isMutating） =====
+
+    @Test
+    @DisplayName("isMutating：文件变更类命令命中")
+    public void test_mutating_file_operations() {
+        assertTrue(guard.isMutating("rm -rf /tmp/x"));
+        assertTrue(guard.isMutating("mv a.txt b.txt"));
+        assertTrue(guard.isMutating("cp -r /etc /backup"));
+        assertTrue(guard.isMutating("mkdir -p /tmp/a/b"));
+        assertTrue(guard.isMutating("touch /tmp/marker"));
+        assertTrue(guard.isMutating("chmod 644 /etc/hosts"));
+        assertTrue(guard.isMutating("chown root:root /etc/hosts"));
+        assertTrue(guard.isMutating("ln -s /a /b"));
+        assertTrue(guard.isMutating("tee /etc/hosts"));
+        assertTrue(guard.isMutating("sed -i 's/a/b/' /etc/hosts"));
+        assertTrue(guard.isMutating("sed -i.bak 's/a/b/' /etc/hosts"));
+        assertTrue(guard.isMutating("find /var/log -name '*.log' -delete"));
+        assertTrue(guard.isMutating("vim /etc/hosts"));
+        assertTrue(guard.isMutating("echo hacked > /etc/hosts"), "输出重定向写文件");
+        assertTrue(guard.isMutating("cat a >> b"), "追加重定向写文件");
+    }
+
+    @Test
+    @DisplayName("isMutating：服务/包/进程/用户/容器等系统变更命中")
+    public void test_mutating_system_operations() {
+        assertTrue(guard.isMutating("systemctl restart nginx"));
+        assertTrue(guard.isMutating("sudo systemctl daemon-reload"));
+        assertTrue(guard.isMutating("apt-get install -y nginx"));
+        assertTrue(guard.isMutating("pip install requests"));
+        assertTrue(guard.isMutating("docker rm -f web"));
+        assertTrue(guard.isMutating("kubectl delete pod web-1"));
+        assertTrue(guard.isMutating("git push origin master"));
+        assertTrue(guard.isMutating("git reset --hard"));
+        assertTrue(guard.isMutating("useradd bob"));
+        assertTrue(guard.isMutating("kill -9 1234"));
+        assertTrue(guard.isMutating("reboot"));
+        assertTrue(guard.isMutating("mount /dev/sdb1 /mnt"));
+        assertTrue(guard.isMutating("crontab -e"));
+        assertTrue(guard.isMutating("curl -o /tmp/x http://example.com"));
+        assertTrue(guard.isMutating("wget -O /tmp/y http://example.com"));
+        assertTrue(guard.isMutating("curl -X POST http://example.com/api"));
+    }
+
+    @Test
+    @DisplayName("isMutating：只读诊断命令不得误伤")
+    public void test_readonly_diagnostics_not_mutating() {
+        assertFalse(guard.isMutating("ls -l /etc"));
+        assertFalse(guard.isMutating("cat /var/log/syslog"));
+        assertFalse(guard.isMutating("grep -rn 'error' /var/log"));
+        assertFalse(guard.isMutating("ps aux | grep java"));
+        assertFalse(guard.isMutating("df -h"));
+        assertFalse(guard.isMutating("du -sh /var/* 2>/dev/null"));
+        assertFalse(guard.isMutating("free -m"));
+        assertFalse(guard.isMutating("top -b -n1"));
+        assertFalse(guard.isMutating("journalctl -u nginx --no-pager -n 100"));
+        assertFalse(guard.isMutating("systemctl status nginx"));
+        assertFalse(guard.isMutating("ss -tlnp"));
+        assertFalse(guard.isMutating("tail -n 100 /var/log/nginx/access.log"));
+        assertFalse(guard.isMutating("sed -n '1,10p' /etc/hosts"), "sed 只读打印不算写");
+        assertFalse(guard.isMutating("grep -i error f"), "grep -i 不是 sed -i");
+        assertFalse(guard.isMutating("uname -a && uptime"));
+        assertFalse(guard.isMutating("git status"));
+        assertFalse(guard.isMutating("git log --oneline -n 5"));
+        assertFalse(guard.isMutating("docker ps"));
+        assertFalse(guard.isMutating("kubectl get pods"));
+        assertFalse(guard.isMutating("curl -s http://127.0.0.1:8091/api/v1/system/health"));
+        // shell 重定向排除：2>&1 / >&2 / >/dev/null / 数字比较都不算写
+        assertFalse(guard.isMutating("ls /proc/*/fd 2>&1 | head"));
+        assertFalse(guard.isMutating("ls 2>/dev/null"));
+        assertFalse(guard.isMutating("cmd >&2"));
+        assertFalse(guard.isMutating("[ 3 -gt 2 ]"), "数字比较不是重定向");
+    }
+
+    @Test
+    @DisplayName("isMutating：null / 空白安全返回 false（空命令交给熔断处理）")
+    public void test_mutating_null_and_blank() {
+        assertFalse(guard.isMutating(null));
+        assertFalse(guard.isMutating(""));
+        assertFalse(guard.isMutating("   "));
+    }
 }

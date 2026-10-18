@@ -1,5 +1,7 @@
 package jainingfei.site.ai.agent.domain.ssh.adapter.port;
 
+import jainingfei.site.ai.agent.domain.ssh.model.valobj.SshCommandResult;
+
 /**
  * 终端会话端口接口 — 定义基础设施层必须实现的终端操作。
  * <p>
@@ -27,6 +29,18 @@ public interface ITerminalSessionPort {
      * @return 干净的 stdout
      */
     String execCommand(String connectionId, String command);
+
+    /**
+     * 独立通道执行命令，返回结构化结果（stdout / stderr / 退出码 / 超时 / 截断）。
+     *
+     * <p>与 {@link #execCommand} 走同一条 ChannelExec 路径，区别只在于把 stderr 与退出码
+     * 一起带回领域层——AI 工具据此判断真实成功与否，而不是靠 stdout 文本猜。
+     *
+     * @param connectionId SSH 连接 ID
+     * @param command      Shell 命令
+     * @return 结构化执行结果
+     */
+    SshCommandResult execCommandDetailed(String connectionId, String command);
 
     /**
      * 检查终端会话是否存在且活跃

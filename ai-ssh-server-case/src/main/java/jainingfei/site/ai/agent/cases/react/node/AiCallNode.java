@@ -116,13 +116,17 @@ public class AiCallNode extends AbstractAIAgentReActSupport {
     @Override
     public StrategyHandler<ChatRequestDTO, DefaultReActFactory.DynamicContext, ReActResultDTO> get(
             ChatRequestDTO requestParameter, DefaultReActFactory.DynamicContext ctx) throws Exception {
-        // 异常回合：直接进入收尾决策
-        if (ctx.getStopReason() != null) {
+        // 异常回合且没有任何已收集的工具结果：直接进入收尾决策
+        // 注意：Runner 报错前可能已经执行过工具（副作用必须落库/打点），此时仍要先经 ToolCallNode 治理，
+        // 否则"执行了命令但没记账"会污染任务态与审计（P0）。
+        if (ctx.getStopReason() != null && ctx.getToolResultsCollected().isEmpty()) {
             return getBean("reactLoopDecisionNode");
         }
         // 收集到工具结果 → ToolCallNode 统一执行副作用；无工具 → LoopDecisionNode 收尾
         if (!ctx.getToolResultsCollected().isEmpty()) {
-            log.info("本轮执行了 {} 个工具，路由到 ToolCallNode", ctx.getToolResultsCollected().size());
+            log.info("本轮执行了 {} 个工具，路由到 ToolCallNode（stopReason={}）",
+                    ctx.getToolResultsCollected().size(),
+                    ctx.getStopReason() != null ? ctx.getStopReason() : "-");
             return getBean("reactToolCallNode");
         }
         return getBean("reactLoopDecisionNode");

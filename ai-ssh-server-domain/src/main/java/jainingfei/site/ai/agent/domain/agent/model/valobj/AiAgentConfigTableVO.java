@@ -171,10 +171,28 @@ public class AiAgentConfigTableVO {
 
             /**
              * 是否只读智能体（YAML 键 read-only）。
-             * <p>只读智能体不挂载 writeRemoteFile 工具；诊断类子智能体应设为 true，
-             * 让"只收集证据、不改系统"从提示词约束升级为工具边界。
+             * <p>只读智能体不挂载 writeRemoteFile 工具，且 executeCommand 在命令级拦截
+             * 明显的写操作（rm/mv/systemctl restart/apt install/写重定向……）——
+             * "只收集证据、不改系统"从提示词约束升级为工具与命令两级边界。
              */
             private Boolean readOnly;
+
+            /**
+             * 派发模式（YAML 键 delegate-mode），仅对声明了 sub-agents 的智能体有意义：
+             * <ul>
+             *   <li>{@link #DELEGATE_MODE_HYBRID}（缺省）：父智能体既可直接执行命令/读写文件，
+             *       也可派发子智能体。简单命令自己干，复杂/需要隔离的任务再派发——不再"逢命令必派发"</li>
+             *   <li>{@link #DELEGATE_MODE_DISPATCH_ONLY}：父智能体只持有派发工具，不挂 executeCommand，
+             *       权责边界由架构保证（旧版行为，适合"纯编排、不执行"的场景）</li>
+             * </ul>
+             */
+            private String delegateMode;
+
+            /** 混合模式：父智能体同时持有执行工具与派发工具（缺省） */
+            public static final String DELEGATE_MODE_HYBRID = "hybrid";
+
+            /** 仅派发模式：父智能体只持有派发工具 */
+            public static final String DELEGATE_MODE_DISPATCH_ONLY = "dispatch-only";
 
         }
 

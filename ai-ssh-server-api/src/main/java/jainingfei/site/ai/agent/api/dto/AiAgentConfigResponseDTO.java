@@ -162,9 +162,14 @@ public class AiAgentConfigResponseDTO {
         private String outputKey;
         /** 可派发的子智能体名（sub-agents 声明，空 = 叶子执行者） */
         private List<String> delegates;
-        /** 是否为编排者（声明了 sub-agents 的智能体不再持有 executeCommand） */
+        /** 是否为编排者（声明了 sub-agents、可派发子智能体） */
         private Boolean orchestrator;
-        /** 是否只读（不挂载 writeRemoteFile） */
+        /**
+         * 派发模式：hybrid（可直接执行 + 可派发）/ dispatch-only（只持有派发工具）；
+         * 无子智能体时为 null。
+         */
+        private String delegateMode;
+        /** 是否只读（不挂载 writeRemoteFile，且 executeCommand 会命令级拦截写操作） */
         private Boolean readOnly;
         /** 该角色实际可用的内置工具 */
         private List<String> tools;

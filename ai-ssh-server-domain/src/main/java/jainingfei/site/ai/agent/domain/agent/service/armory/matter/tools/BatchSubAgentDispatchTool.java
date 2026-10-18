@@ -29,10 +29,14 @@ import java.util.Optional;
  *
  * <p>入参结构（LLM 可见）：
  * <pre>
- *   tasks           [{taskId?, agentName*, request*, dependsOn?, timeoutSeconds?, maxRetries?}] 必填
+ *   tasks           [{taskId?, agentName*, request*, dependsOn?, timeoutSeconds?}] 必填
  *   maxConcurrency  并发上限（默认 4，校验层钳制 [1,8]）
  *   failFast        失败即中止（默认 false；变更链路建议 true）
  * </pre>
+ *
+ * <p>为什么 schema 里没有 {@code maxRetries}：重试对非幂等写操作（改配置、重启服务）会放大风险，
+ * 交给模型逐任务决定是错误的分工。内部仍保留重试能力（{@link SubAgentDispatchService} 的默认值 +
+ * 配置层约束），但不再暴露给模型选择。
  *
  * <p>安全边界：{@code agentName} 必须是<b>父智能体声明的子智能体</b>（白名单来自 sub-agents 配置），
  * 模型无法派发配置之外的智能体；任务计划先过 {@link PlanParser} 与 {@link PlanValidator} 两道校验。
@@ -62,7 +66,7 @@ public class BatchSubAgentDispatchTool extends BaseTool {
         this.planValidator = planValidator;
     }
 
-    /** 函数签名：tasks 数组（每项含 agentName+request 必填，可选依赖/超时/重试）+ 可选并发与 failFast */
+    /** 函数签名：tasks 数组（每项含 agentName+request 必填，可选依赖/超时）+ 可选并发与 failFast */
     @Override
     public Optional<FunctionDeclaration> declaration() {
         Schema taskSchema = Schema.builder()
@@ -75,8 +79,7 @@ public class BatchSubAgentDispatchTool extends BaseTool {
                                 .type(new Type(Type.Known.ARRAY))
                                 .items(Schema.builder().type(new Type(Type.Known.STRING)).build())
                                 .build(),
-                        "timeoutSeconds", Schema.builder().type(new Type(Type.Known.INTEGER)).build(),
-                        "maxRetries", Schema.builder().type(new Type(Type.Known.INTEGER)).build()))
+                        "timeoutSeconds", Schema.builder().type(new Type(Type.Known.INTEGER)).build()))
                 .required(ImmutableList.of("agentName", "request"))
                 .build();
 

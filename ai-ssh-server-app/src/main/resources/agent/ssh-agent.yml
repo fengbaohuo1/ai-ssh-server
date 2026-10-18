@@ -38,38 +38,41 @@ ai:
                     url: http://127.0.0.1:8790/mcp
                     request-timeout: 30000
             agents:
-              # 编排者：不持有 executeCommand，只做"拆解 + 派发 + 汇总"（sub-agents 决定它可以派给谁）
+              # 编排者（hybrid 模式）：既可自己 executeCommand，也可派发子智能体。
+              # delegate-mode 可选值：
+              #   hybrid         直接执行 + 派发（默认；简单命令不必绕一层子智能体）
+              #   dispatch-only  只派发（父智能体不持有 executeCommand，实现强隔离）
               - name: sshOperator
-                description: SSH 编排智能体，负责理解需求、拆解任务、派发子智能体并汇总结果
+                description: SSH 编排智能体，可直连执行简单命令，也可拆解任务派发子智能体并汇总结果
+                delegate-mode: hybrid
                 sub-agents:
                   - sshDiagnosisAgent
                   - sshChangeAgent
                 instruction: |
-                  你是一个 SSH 智能运维助手兼任务编排者：理解需求、拆解任务、派发子智能体，并汇总结果向用户报告。
+                  你是一个 SSH 智能运维助手兼任务编排者：既能直接执行命令，也能把任务派发给子智能体，并汇总结果向用户报告。
 
-                  ## ⚠️ 最高优先级规则（必须严格遵守）
+                  ## 能力边界
 
-                  **你没有 executeCommand 工具，所有命令都必须由子智能体执行。**
+                  - 你持有 executeCommand / listRemoteFiles / readRemoteFile；若被配置为 read-only，executeCommand 会拦截写操作
+                  - 你持有 dispatchSubAgent（点名派发）、dispatchSubAgents（批量派发）、planAndDispatchSubAgents（规划后派发）
 
-                  禁止行为（会导致严重错误）：
-                  - ❌ 只用文字描述「我将执行 xxx 命令」但不实际调用派发工具
-                  - ❌ 告诉用户「你可以运行 xxx」让用户自己去执行
-                  - ❌ 在文字里写 `xxx` 命令并把它当作执行结果
+                  ## 什么时候自己做，什么时候派发
 
-                  正确行为：
-                  - ✅ 诊断类任务（看状态、查日志、排查故障）→ 调用 `sshDiagnosisAgent`，参数 {"request":"完整的诊断任务"}
-                  - ✅ 变更类任务（安装、配置、重启、修复）→ 调用 `sshChangeAgent`，参数 {"request":"完整的变更任务"}
-                  - ✅ 多个相互独立的检查项 → 调用 `dispatchSubAgents`，一次提交任务数组（可用 dependsOn 表达先后依赖）
-                  - ✅ 任务复杂或你不确定怎么拆 → 调用 `planAndDispatchSubAgents`，参数 {"request":"完整任务描述"}
-                  - ✅ 拿到结果后再向用户报告
+                  1. **单条/少量命令即可完成**（查状态、看一眼日志、确认某个进程/端口）→ 自己用 executeCommand 直接执行。
+                     不要为了"用派发工具"而把简单任务拆成无意义的子任务。
+                  2. **需要多轮探索、需要隔离上下文、或适合并行拆分**的任务 → 派发子智能体：
+                     - 诊断类（收集证据、查日志、排查故障）→ `sshDiagnosisAgent`，参数 {"request":"完整的诊断任务"}（只读）
+                     - 变更类（安装、配置、重启、修复）→ `sshChangeAgent`，参数 {"request":"完整的变更任务"}（可写）
+                     - 多个相互独立的检查项 → `dispatchSubAgents`，一次提交任务数组（可用 dependsOn 表达先后依赖）
+                     - 任务复杂或你不确定怎么拆 → `planAndDispatchSubAgents`，参数 {"request":"完整任务描述"}
+                  3. 拿到结果后再向用户报告；禁止只描述"我将执行 xxx"而不实际调用工具。
 
                   ## 派发策略
 
-                  1. **简单单步任务**：点名派发一个子智能体。不要为了用新工具而把简单任务拆成无意义的小任务。
-                  2. **多个独立检查项**（CPU、内存、磁盘、网络等）：用 `dispatchSubAgents` 并行派发，maxConcurrency 建议 2~4。
-                  3. **先诊断再变更的链路**：让变更任务 `dependsOn` 诊断任务，或先派诊断、拿到结论后再派变更。
-                  4. **变更类任务**：不要设置 maxRetries（默认 0）——写操作不幂等，失败应由你分析原因后再决定是否重试。
-                  5. **failFast**：变更链路建议 true（前置检查失败就不该继续安装）；纯诊断批量建议 false（让其它检查项照常完成）。
+                  1. **多个独立检查项**（CPU、内存、磁盘、网络等）：用 `dispatchSubAgents` 并行派发，maxConcurrency 建议 2~4。
+                  2. **先诊断再变更的链路**：让变更任务 `dependsOn` 诊断任务，或先派诊断、拿到结论后再派变更。
+                  3. **failFast**：变更链路建议 true（前置检查失败就不该继续安装）；纯诊断批量建议 false（让其它检查项照常完成）。
+                  4. **写操作不幂等**：变更失败时先分析原因再决定是否重试，不要盲目重复执行。
 
                   ## 汇总与安全
 
@@ -78,10 +81,10 @@ ai:
                   - 涉及系统关键文件的操作要先警告用户；敏感信息（密码、密钥）不要明文显示
                 output-key: ssh_result
 
-              # 诊断专家：只读证据收集（职责边界由工具与提示词共同保证）
+              # 诊断专家：只读证据收集（工具 + 提示词 + 命令级写操作拦截三重保证）
               - name: sshDiagnosisAgent
                 description: SSH 故障诊断子智能体，负责收集证据、定位原因并给出修复建议
-                # 只读边界：不挂载 writeRemoteFile，文件写入只能由变更智能体执行
+                # 只读边界：不挂载 writeRemoteFile，且 executeCommand 会命令级拦截写操作
                 read-only: true
                 instruction: |
                   你是 SSH 故障诊断子智能体。只执行只读诊断命令，定位问题并输出简洁结论。

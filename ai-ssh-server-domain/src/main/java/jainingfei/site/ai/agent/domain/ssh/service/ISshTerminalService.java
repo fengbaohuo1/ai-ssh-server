@@ -1,5 +1,7 @@
 package jainingfei.site.ai.agent.domain.ssh.service;
 
+import jainingfei.site.ai.agent.domain.ssh.model.valobj.SshCommandResult;
+
 /**
  * SSH 终端领域服务接口。
  * <p>
@@ -24,6 +26,13 @@ public interface ISshTerminalService {
      * AI 工具专用，无回显/ANSI/prompt/状态污染。
      */
     String execCommand(String connectionId, String command);
+
+    /**
+     * 独立通道执行命令，返回结构化结果——stdout / stderr / 退出码 / 超时 / 截断。
+     *
+     * <p>AI 工具应优先走这个入口：只有退出码能可靠区分"命令成功但无输出"与"命令失败"。
+     */
+    SshCommandResult execCommandDetailed(String connectionId, String command);
 
     /**
      * 检查终端会话是否存在且活跃

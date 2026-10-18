@@ -6,7 +6,9 @@ import com.jcraft.jsch.JSchException;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.ssh.adapter.port.ISshSessionPort;
 import jainingfei.site.ai.agent.domain.ssh.adapter.port.ITerminalSessionPort;
+import jainingfei.site.ai.agent.domain.ssh.model.valobj.SshCommandResult;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.ByteArrayOutputStream;
@@ -36,6 +38,14 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
 
     @Resource
     private ISshSessionPort sshSessionPort;
+
+    /** 单条命令执行时限（秒）：超时主动断开通道，避免 tail -f / 死循环命令无限期占住线程 */
+    @Value("${ai.ssh.exec.timeout-seconds:300}")
+    private int execTimeoutSeconds = 300;
+
+    /** stdout + stderr 合计上限（字节）：超过即断开并标记 truncated，防止输出无限增长打爆内存 */
+    @Value("${ai.ssh.exec.max-output-bytes:262144}")
+    private int execMaxOutputBytes = 262144;
 
     /** connectionId → 统一终端会话 */
     private final ConcurrentHashMap<String, UnifiedTerminalSession> sessions = new ConcurrentHashMap<>();
@@ -198,33 +208,89 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
     /**
      * ChannelExec 独立通道执行命令——无回显、无 ANSI、无 prompt，返回纯净 stdout。
      * AI 工具专用。每次新建 ChannelExec，执行完即关闭，不共享状态。
+     *
+     * <p>兼容入口：只回传 stdout（丢弃 stderr 与退出码）。AI 工具请走
+     * {@link #execCommandDetailed}，那里能拿到 stderr / 退出码 / 超时 / 截断。
      */
     @Override
     public String execCommand(String connectionId, String command) {
+        return execCommandDetailed(connectionId, command).getStdout();
+    }
+
+    /**
+     * ChannelExec 结构化执行：stdout + stderr + 退出码 + 超时 + 截断。
+     *
+     * <p>三个此前缺失的能力：
+     * <ul>
+     *   <li><b>stderr</b>：旧实现 {@code setErrStream(System.err, true)} 把错误丢给进程控制台，
+     *       模型永远看不到失败原因</li>
+     *   <li><b>退出码</b>：旧实现只回传文本，{@code ls /not-exist}（stderr 有内容、stdout 为空）
+     *       被判成"空输出=成功"</li>
+     *   <li><b>超时与输出上限</b>：旧实现 {@code while (!channel.isClosed())} 无上限等待、
+     *       ByteArrayOutputStream 无上限增长——一条 {@code tail -f} 就能拖死线程</li>
+     * </ul>
+     */
+    @Override
+    public SshCommandResult execCommandDetailed(
+            String connectionId, String command) {
         var jschSession = sshSessionPort.getSession(connectionId);
         if (jschSession == null || !jschSession.isConnected()) {
             throw new IllegalStateException("SSH 连接未建立: " + connectionId);
         }
 
         ChannelExec channel = null;
+        var out = new ByteArrayOutputStream();
+        var err = new ByteArrayOutputStream();
+        boolean timedOut = false;
+        boolean truncated = false;
         try {
             channel = (ChannelExec) jschSession.openChannel("exec");
             channel.setCommand(command);
             channel.setInputStream(null);
-            channel.setErrStream(System.err, true);
-
-            var out = new ByteArrayOutputStream();
             channel.setOutputStream(out);
+            channel.setErrStream(err);
             channel.connect(10_000);
 
+            long deadline = System.currentTimeMillis() + execTimeoutSeconds * 1000L;
             while (!channel.isClosed()) {
-                try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                if (System.currentTimeMillis() >= deadline) {
+                    timedOut = true;
+                    break;
+                }
+                if (out.size() + err.size() > execMaxOutputBytes) {
+                    truncated = true;
+                    break;
+                }
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
 
-            String result = out.toString(StandardCharsets.UTF_8);
+            Integer exitStatus = null;
+            if (channel.isClosed()) {
+                int code = channel.getExitStatus();
+                exitStatus = code >= 0 ? code : null;
+            }
+            if (timedOut || truncated) {
+                log.warn("[EXEC] 提前断开 connectionId={} timedOut={} truncated={} command={}",
+                        connectionId, timedOut, truncated, command);
+            }
 
-            log.debug("[EXEC] connectionId={} command={} outputLen={}", connectionId, command, result.length());
-            return result.trim();
+            var result = SshCommandResult.builder()
+                    .stdout(out.toString(StandardCharsets.UTF_8).trim())
+                    .stderr(err.toString(StandardCharsets.UTF_8).trim())
+                    .exitStatus(exitStatus)
+                    .timedOut(timedOut)
+                    .truncated(truncated)
+                    .build();
+
+            log.debug("[EXEC] connectionId={} command={} exitStatus={} stdoutLen={} stderrLen={}",
+                    connectionId, command, exitStatus,
+                    result.getStdout().length(), result.getStderr().length());
+            return result;
 
         } catch (Exception e) {
             log.error("[EXEC] 执行失败 connectionId={} command={}", connectionId, command, e);

@@ -6,6 +6,7 @@ import com.jcraft.jsch.Session;
 import jainingfei.site.ai.agent.infrastructure.adapter.port.SshSessionPort;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Console;
@@ -18,10 +19,14 @@ import java.util.Scanner;
  * Package: jainingfei.site.ai.agent.test.ssh
  *
  * @Author 贾宁飞
- * @Description
+ * @Description 手动交互测试：需要真实 SSH 服务器与控制台输入密码。
+ *              默认跳过（否则 `mvn test` 会卡在 readPasswordFromConsole 上）；
+ *              本地手动执行：设置环境变量 AI_SSH_MANUAL_SSH=true 后运行本类，或直接跑 main()。
  * @Create 2026/7/1 下午5:52
  * @Version 1.0
  */
+@EnabledIfEnvironmentVariable(named = "AI_SSH_MANUAL_SSH", matches = "true",
+        disabledReason = "手动 SSH 交互测试：需真实凭据 + 控制台输入，设置 AI_SSH_MANUAL_SSH=true 启用")
 public class SshSessionPortManualTest {
     /**
      * 这里的 IP、账号要换成你自己的云服务器；
