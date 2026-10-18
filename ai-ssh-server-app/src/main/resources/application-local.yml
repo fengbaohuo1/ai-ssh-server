@@ -1,0 +1,44 @@
+# =====================================================================
+# local —— 桌面端本地单机模式（默认 profile）
+#
+# 设计目标：jar + JRE 打进 Tauri 后无需 MySQL / 无需外部服务即可启动。
+#   - 数据目录：${AI_SSH_HOME}（启动时由 Application 解析并写入系统属性）
+#   - 数据库：H2 文件库 ${AI_SSH_HOME}/data/ai-ssh（MODE=MySQL 兼容现有 PO 写法）
+#   - 配置：${AI_SSH_HOME}/config/agent.yml（主配置，模板自动复制）
+#           ${AI_SSH_HOME}/config/llm.yml（模型覆盖层，由配置页生成，后导入 → 覆盖主配置同名键）
+#   - 仅监听 127.0.0.1，接口鉴权默认关闭（本机单用户）
+# =====================================================================
+server:
+  address: 127.0.0.1
+  port: ${SERVER_PORT:8091}
+
+spring:
+  datasource:
+    # 文件库落在应用数据目录；DATABASE_TO_LOWER=TRUE 让 H2 标识符与 MySQL 小写习惯一致，
+    # NON_KEYWORDS 放行 MySQL 常见列名（role/value/type/key/status）
+    url: jdbc:h2:file:${AI_SSH_HOME}/data/ai-ssh;MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=ROLE,VALUE,TYPE,KEY,STATUS;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  sql:
+    init:
+      # 本地库无迁移工具：每次启动执行幂等 DDL（CREATE TABLE IF NOT EXISTS）
+      mode: always
+      schema-locations: classpath:db/schema-h2.sql
+  config:
+    # 外部配置：Agent 主配置 + 模型覆盖层（顺序即优先级，后者覆盖前者）
+    import:
+      - optional:file:${AI_SSH_HOME}/config/agent.yml
+      - optional:file:${AI_SSH_HOME}/config/llm.yml
+
+# 本机单用户桌面应用默认不启用接口令牌鉴权（如需对外暴露请切到 server profile）
+ai:
+  security:
+    auth-enabled: false
+
+# 日志：沿用 logback-spring.xml，落盘目录切到应用数据目录（桌面端 cwd 不可控）
+logging:
+  level:
+    root: info
+  config: classpath:logback-spring.xml
+  path: ${AI_SSH_HOME}/logs

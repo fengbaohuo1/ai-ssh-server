@@ -9,6 +9,9 @@ import io.reactivex.rxjava3.core.Single;
 import jakarta.annotation.Resource;
 import jainingfei.site.ai.agent.domain.agent.support.SshSessionBindings;
 import jainingfei.site.ai.agent.domain.agent.support.TextRetentionUtil;
+import jainingfei.site.ai.agent.domain.security.model.valobj.enums.AuditActionEnum;
+import jainingfei.site.ai.agent.domain.security.service.IAuditService;
+import jainingfei.site.ai.agent.domain.security.support.AuditContext;
 import jainingfei.site.ai.agent.domain.ssh.service.ISshTerminalService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Scope;
@@ -51,6 +54,9 @@ public class SshExecuteAdkTool extends BaseTool {
 
     @Resource
     private CommandGuard commandGuard;
+
+    @Resource
+    private IAuditService auditService;
 
     public SshExecuteAdkTool() {
         super("executeCommand",
@@ -132,6 +138,7 @@ public class SshExecuteAdkTool extends BaseTool {
 
     /** 共用执行体：连接存活检查 → 危险命令拦截 → 执行 → 结果组装 */
     private Map<String, Object> doExecute(String sessionId, String connectionId, String command) {
+        long start = System.currentTimeMillis();
         try {
             if (!sshTerminalService.sessionExists(connectionId)) {
                 log.warn("[EXEC] 终端会话不存在: {}", connectionId);
@@ -140,6 +147,9 @@ public class SshExecuteAdkTool extends BaseTool {
 
             if (commandGuard.isDangerous(command)) {
                 log.warn("[EXEC] 危险命令被拦截: connectionId={} command={}", connectionId, command);
+                auditService.record(AuditContext.userId(), connectionId, null,
+                        AuditActionEnum.COMMAND_EXECUTE, command, "危险命令被拦截",
+                        null, false, System.currentTimeMillis() - start, AuditContext.clientIp());
                 return result(false, command,
                         "⚠️ 危险命令被拦截: " + command
                                 + "\n该命令可能导致系统损坏或数据丢失。如确需执行，请手动在终端操作。",
@@ -151,6 +161,10 @@ public class SshExecuteAdkTool extends BaseTool {
             log.info("[EXEC] SSH执行完成: outputLength={}", output.length());
 
             boolean success = CommandOutcomeAnalyzer.isSuccessful(output);
+            auditService.record(AuditContext.userId(), connectionId, null,
+                    AuditActionEnum.COMMAND_EXECUTE, command,
+                    "输出 " + output.length() + " 字符", null, success,
+                    System.currentTimeMillis() - start, AuditContext.clientIp());
             // head/tail 保留 + 精确省略计数：命令输出超限时模型只看到首尾（页脚提示可要求补充）
             String boundedOutput = TextRetentionUtil.retainHeadTail(output, MAX_TOOL_OUTPUT_LENGTH);
             return result(success, command, boundedOutput,
@@ -158,6 +172,9 @@ public class SshExecuteAdkTool extends BaseTool {
 
         } catch (Exception e) {
             log.error("[EXEC] 异常: connectionId={} command={}", connectionId, command, e);
+            auditService.record(AuditContext.userId(), connectionId, null,
+                    AuditActionEnum.COMMAND_EXECUTE, command, e.getMessage(), null, false,
+                    System.currentTimeMillis() - start, AuditContext.clientIp());
             return result(false, command != null ? command : "",
                     "命令执行异常: " + e.getMessage(), null);
         }

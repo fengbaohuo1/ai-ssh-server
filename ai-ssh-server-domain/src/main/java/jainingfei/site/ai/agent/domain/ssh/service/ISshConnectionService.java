@@ -21,6 +21,17 @@ public interface ISshConnectionService {
     SshConnectionAggregate createConnection(SshConnectionEntity connection, SshConnectionConfigEntity config);
 
     /**
+     * 更新连接配置（部分更新：null = 不修改；凭证空串 = 保持原值）。
+     *
+     * @param connectionId 连接 ID
+     * @param patch        基础字段补丁
+     * @param configPatch  高级配置补丁
+     * @return 更新后的聚合
+     */
+    SshConnectionAggregate updateConnection(String connectionId, SshConnectionEntity patch,
+                                            SshConnectionConfigEntity configPatch);
+
+    /**
      * 建立 SSH 连接
      *
      * @param connectionId 连接 ID

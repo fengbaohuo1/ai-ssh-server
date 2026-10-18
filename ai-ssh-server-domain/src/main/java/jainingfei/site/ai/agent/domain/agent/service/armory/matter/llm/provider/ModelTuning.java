@@ -32,6 +32,12 @@ public class ModelTuning {
     /** 采样温度；null = 不设置 */
     Double temperature;
 
+    /** 单次回复最大 token 数；null = 不设置 */
+    Integer maxTokens;
+
+    /** 核采样 top-p；null = 不设置 */
+    Double topP;
+
     /**
      * 是否显式开关思考（true=开启 / false=关闭 / null=跟随服务端默认）。
      * <p>只有支持该能力的通道（{@link ProviderCapabilities#isThinkingToggle()}）才会落实。

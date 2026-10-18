@@ -91,6 +91,12 @@ public class DeepSeekNativeProfile implements ProviderProfile {
                             + "辅助链路请用 ModelTuning.deterministic(...)（显式关思考）", tuning.getTemperature());
                 }
             }
+            if (tuning.getMaxTokens() != null) {
+                options.maxTokens(tuning.getMaxTokens());
+            }
+            if (tuning.getTopP() != null) {
+                options.topP(tuning.getTopP());
+            }
             if (StringUtils.isNotBlank(tuning.getReasoningEffort())) {
                 Optional<DeepSeekApi.ChatCompletionRequest.ReasoningEffort> effort =
                         resolveReasoningEffort(tuning.getReasoningEffort());

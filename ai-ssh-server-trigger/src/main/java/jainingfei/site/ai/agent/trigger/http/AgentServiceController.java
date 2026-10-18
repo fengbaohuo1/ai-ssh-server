@@ -8,6 +8,7 @@ import jainingfei.site.ai.agent.cases.react.IAIAgentReActServiceCase;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatMessageEntity;
 import jainingfei.site.ai.agent.domain.agent.model.entity.ChatSessionEntity;
 import jainingfei.site.ai.agent.domain.agent.model.valobj.AiAgentConfigTableVO;
+import jainingfei.site.ai.agent.domain.agent.model.valobj.properties.SessionGovernanceProperties;
 import jainingfei.site.ai.agent.domain.agent.service.IChatService;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ChatModelFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderCapabilities;
@@ -31,7 +32,6 @@ import java.util.stream.Collectors;
 @Slf4j
 @RestController
 @RequestMapping("/api/v1/")
-@CrossOrigin(origins = "*")
 public class AgentServiceController implements IAgentService {
 
     @Resource
@@ -40,6 +40,9 @@ public class AgentServiceController implements IAgentService {
     @Resource
     private IAIAgentReActServiceCase reactServiceCase;
 
+    @Resource
+    private SessionGovernanceProperties sessionGovernanceProperties;
+
     @RequestMapping(value = "query_ai_agent_config_list", method = RequestMethod.GET)
     @Override
     public Response<List<AiAgentConfigResponseDTO>> queryAiAgentConfigList() {
@@ -47,7 +50,7 @@ public class AgentServiceController implements IAgentService {
             log.info("查询智能体配置列表");
             List<AiAgentConfigTableVO> tables = chatService.queryAiAgentConfigList();
             List<AiAgentConfigResponseDTO> responseDTOS = tables.stream()
-                    .map(AgentServiceController::toConfigResponse)
+                    .map(this::toConfigResponse)
                     .filter(java.util.Objects::nonNull)
                     .collect(Collectors.toList());
             return Response.<List<AiAgentConfigResponseDTO>>builder()
@@ -90,7 +93,7 @@ public class AgentServiceController implements IAgentService {
     }
 
     /** 配置表 VO → 响应 DTO（剔除 apiKey 等机密；模块/能力缺省为空列表） */
-    private static AiAgentConfigResponseDTO toConfigResponse(AiAgentConfigTableVO vo) {
+    private AiAgentConfigResponseDTO toConfigResponse(AiAgentConfigTableVO vo) {
         if (vo == null || vo.getAgent() == null) {
             return null;
         }
@@ -100,6 +103,9 @@ public class AgentServiceController implements IAgentService {
         dto.setAgentName(agent.getAgentName());
         dto.setAgentDesc(agent.getAgentDesc());
         dto.setAppName(vo.getAppName());
+        dto.setRuntime(runtimeInfo());
+        dto.setConfigWarnings(new ArrayList<>());
+        dto.setBuiltinTools(new ArrayList<>());
 
         AiAgentConfigTableVO.Module module = vo.getModule();
         if (module != null) {
@@ -114,7 +120,13 @@ public class AgentServiceController implements IAgentService {
                 modelInfo.setBaseUrl(chatModel.getBaseUrl());
                 modelInfo.setContextSize(chatModel.getContextSize());
                 modelInfo.setReasoningEffort(chatModel.getReasoningEffort());
+                modelInfo.setTemperature(chatModel.getTemperature());
+                modelInfo.setMaxTokens(chatModel.getMaxTokens());
+                modelInfo.setTopP(chatModel.getTopP());
                 dto.setChatModel(modelInfo);
+                collectWarnings(chatModel, capabilities, dto.getConfigWarnings());
+            } else {
+                dto.getConfigWarnings().add("未配置 chat-model，智能体无法装配模型");
             }
 
             // 子智能体名
@@ -130,13 +142,27 @@ public class AgentServiceController implements IAgentService {
                             role.setDescription(a.getDescription());
                             role.setOutputKey(a.getOutputKey());
                             role.setDelegates(a.getSubAgents() == null ? new ArrayList<>() : new ArrayList<>(a.getSubAgents()));
-                            role.setOrchestrator(ObjectUtils.isNotEmpty(a.getSubAgents()));
+                            boolean orchestrator = ObjectUtils.isNotEmpty(a.getSubAgents());
+                            boolean readOnly = Boolean.TRUE.equals(a.getReadOnly());
+                            role.setOrchestrator(orchestrator);
+                            role.setReadOnly(readOnly);
+                            role.setTools(toolsFor(orchestrator, readOnly));
+                            role.setInstructionPreview(truncate(a.getInstruction(), 600));
                             return role;
                         })
                         .collect(Collectors.toList()));
+                // 内置工具并集（去重保序）
+                for (AiAgentConfigResponseDTO.AgentRoleInfo role : dto.getAgentRoles()) {
+                    for (String tool : role.getTools()) {
+                        if (!dto.getBuiltinTools().contains(tool)) {
+                            dto.getBuiltinTools().add(tool);
+                        }
+                    }
+                }
             } else {
                 dto.setSubAgents(new ArrayList<>());
                 dto.setAgentRoles(new ArrayList<>());
+                dto.getConfigWarnings().add("配置未声明任何智能体（module.agents 为空）");
             }
 
             // 工作流
@@ -178,6 +204,73 @@ public class AgentServiceController implements IAgentService {
             dto.setPlugins(new ArrayList<>());
         }
         return dto;
+    }
+
+    /** 运行期治理参数快照 */
+    private AiAgentConfigResponseDTO.RuntimeInfo runtimeInfo() {
+        AiAgentConfigResponseDTO.RuntimeInfo runtime = new AiAgentConfigResponseDTO.RuntimeInfo();
+        runtime.setMaxLlmCalls(sessionGovernanceProperties.getLoop().getMaxLlmCalls());
+        runtime.setCompactEnabled(sessionGovernanceProperties.getCompact().isEnabled());
+        runtime.setCompactTokenThreshold(sessionGovernanceProperties.getCompact().getTokenThreshold());
+        runtime.setCompactEventRetentionSize(sessionGovernanceProperties.getCompact().getEventRetentionSize());
+        runtime.setContextTokenBudget(sessionGovernanceProperties.getContextTokenBudget());
+        runtime.setColdStartReplayBudgetChars(sessionGovernanceProperties.getColdStart().getReplayBudgetChars());
+        return runtime;
+    }
+
+    /** 按角色推导内置工具：编排者只有派发工具；执行者按 readOnly 决定是否含写入 */
+    private static List<String> toolsFor(boolean orchestrator, boolean readOnly) {
+        List<String> tools = new ArrayList<>();
+        if (orchestrator) {
+            tools.add("dispatchSubAgent");
+            tools.add("dispatchSubAgents");
+            tools.add("planAndDispatchSubAgents");
+            return tools;
+        }
+        tools.add("executeCommand");
+        tools.add("listRemoteFiles");
+        tools.add("readRemoteFile");
+        if (!readOnly) {
+            tools.add("writeRemoteFile");
+        }
+        return tools;
+    }
+
+    /** 配置软问题收集（不让界面靠猜"为什么模型没反应"） */
+    private static void collectWarnings(AiAgentConfigTableVO.Module.ChatModel chatModel,
+                                        ProviderCapabilities capabilities,
+                                        List<String> warnings) {
+        if (capabilities == null) {
+            warnings.add("未知模型通道: " + chatModel.getProvider()
+                    + "（装配期会失败，可选 deepseek-native / openai-compatible）");
+        }
+        if (ObjectUtils.isEmpty(chatModel.getModel())) {
+            warnings.add("未配置模型名（chat-model.model）");
+        }
+        if (ObjectUtils.isEmpty(chatModel.getApiKey())) {
+            warnings.add("未配置 api-key，装配期将无法创建模型");
+        }
+        if (chatModel.getContextSize() == null || chatModel.getContextSize() <= 0) {
+            warnings.add("未配置上下文窗口（chat-model.context-size），界面无法展示上下文预算");
+        }
+        if (chatModel.getTemperature() != null
+                && (chatModel.getTemperature() < 0 || chatModel.getTemperature() > 2)) {
+            warnings.add("temperature=" + chatModel.getTemperature() + " 超出常规范围 [0,2]");
+        }
+        if (chatModel.getMaxTokens() != null && chatModel.getMaxTokens() <= 0) {
+            warnings.add("max-tokens 必须为正整数");
+        }
+        if (chatModel.getTopP() != null && (chatModel.getTopP() <= 0 || chatModel.getTopP() > 1)) {
+            warnings.add("top-p=" + chatModel.getTopP() + " 超出常规范围 (0,1]");
+        }
+    }
+
+    private static String truncate(String value, int max) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.length() <= max ? trimmed : trimmed.substring(0, max) + "…";
     }
 
     /** MCP 工具映射：remote/stdio/local 三种连接形态归一为 {name, kind, target} */

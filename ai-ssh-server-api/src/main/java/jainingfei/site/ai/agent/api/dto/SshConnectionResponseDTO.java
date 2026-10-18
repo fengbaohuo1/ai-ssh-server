@@ -3,6 +3,7 @@ package jainingfei.site.ai.agent.api.dto;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * SSH 连接响应 DTO
@@ -33,6 +34,21 @@ public class SshConnectionResponseDTO {
 
     /** 用户 ID */
     private String userId;
+
+    /** 分组 */
+    private String groupName;
+
+    /** 标签 */
+    private List<String> tags;
+
+    /** 备注 */
+    private String remark;
+
+    /** 是否收藏 */
+    private Boolean favorite;
+
+    /** 最近一次成功连接时间 */
+    private LocalDateTime lastConnectedAt;
 
     /** 创建时间 */
     private LocalDateTime createdAt;

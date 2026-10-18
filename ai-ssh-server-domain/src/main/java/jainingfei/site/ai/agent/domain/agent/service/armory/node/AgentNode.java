@@ -13,6 +13,9 @@ import jainingfei.site.ai.agent.domain.agent.service.armory.AbstractArmorySuppor
 import jainingfei.site.ai.agent.domain.agent.service.armory.factory.DefaultArmoryFactory;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.SpringAiLlmAdapter;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.llm.provider.ProviderProfile;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.ListRemoteFilesTool;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.ReadRemoteFileTool;
+import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.WriteRemoteFileTool;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.BatchSubAgentDispatchTool;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.DynamicAgentOrchestrator;
 import jainingfei.site.ai.agent.domain.agent.service.armory.matter.tools.DynamicPlanDispatchTool;
@@ -60,6 +63,15 @@ public class AgentNode extends AbstractArmorySupport {
     private SshExecuteAdkTool sshExecuteAdkTool;
 
     @Resource
+    private ListRemoteFilesTool listRemoteFilesTool;
+
+    @Resource
+    private ReadRemoteFileTool readRemoteFileTool;
+
+    @Resource
+    private WriteRemoteFileTool writeRemoteFileTool;
+
+    @Resource
     private SubAgentDispatchService subAgentDispatchService;
 
     @Resource
@@ -85,13 +97,13 @@ public class AgentNode extends AbstractArmorySupport {
         // MCP/技能工具集（ChatModelNode 装配）：不再向共享列表里塞 SSH 工具，
         // 保证父智能体重建时可以只拿到"非执行类"工具
         List<BaseToolset> mcpOnlyToolsets = new ArrayList<>(dynamicContext.getMcpToolsets());
-        List<BaseToolset> sshCapableToolsets = new ArrayList<>(mcpOnlyToolsets);
-        sshCapableToolsets.add(new StaticToolset(List.of(sshExecuteAdkTool)));
 
-        // 第一段：全员装配
+        // 第一段：全员装配。执行型智能体拿到"命令 + 文件读写"工具集；
+        // read-only=true 的诊断型智能体不挂 writeRemoteFile，能力边界由配置决定。
         for (AiAgentConfigTableVO.Module.Agent agentConfig : agents) {
             dynamicContext.getAgentGroup().put(agentConfig.getName(),
-                    buildAgent(agentConfig, providerProfile, sshCapableToolsets));
+                    buildAgent(agentConfig, providerProfile,
+                            leafToolsets(agentConfig, mcpOnlyToolsets)));
         }
 
         // 第二段：为声明了 sub-agents 的智能体换上派发工具集
@@ -113,6 +125,30 @@ public class AgentNode extends AbstractArmorySupport {
                 .outputKey(agentConfig.getOutputKey())
                 .tools(tools)
                 .build();
+    }
+
+    /**
+     * 执行型智能体的工具集：命令执行 + 目录浏览 + 文件读取，非只读时再加文件写入。
+     *
+     * <p>MCP / 技能工具对所有执行型智能体保持可见。
+     */
+    private List<Object> leafToolsets(AiAgentConfigTableVO.Module.Agent agentConfig,
+                                      List<BaseToolset> mcpOnlyToolsets) {
+        List<BaseTool> sshTools = new ArrayList<>();
+        sshTools.add(sshExecuteAdkTool);
+        sshTools.add(listRemoteFilesTool);
+        sshTools.add(readRemoteFileTool);
+        if (!Boolean.TRUE.equals(agentConfig.getReadOnly())) {
+            sshTools.add(writeRemoteFileTool);
+        }
+
+        List<Object> tools = new ArrayList<>();
+        tools.add(new StaticToolset(sshTools));
+        tools.addAll(mcpOnlyToolsets);
+        log.info("执行型智能体工具集 | agent:{} | readOnly:{} | tools:[{}]",
+                agentConfig.getName(), Boolean.TRUE.equals(agentConfig.getReadOnly()),
+                sshTools.stream().map(BaseTool::name).collect(Collectors.joining(", ")));
+        return tools;
     }
 
     /**

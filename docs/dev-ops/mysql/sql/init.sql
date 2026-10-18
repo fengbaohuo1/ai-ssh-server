@@ -40,12 +40,19 @@ CREATE TABLE `ssh_connection` (
                                   `encrypted` tinyint NOT NULL DEFAULT '1' COMMENT '是否加密:0-否,1-是',
                                   `status` tinyint NOT NULL DEFAULT '0' COMMENT '连接状态:0-未连接,1-已连接,2-连接中,3-连接失败',
                                   `user_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'default' COMMENT '用户ID',
+                                  `group_name` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '主机分组',
+                                  `tags` varchar(512) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '标签(逗号分隔)',
+                                  `remark` varchar(512) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '备注',
+                                  `favorite` tinyint NOT NULL DEFAULT '0' COMMENT '是否收藏:0-否,1-是',
+                                  `last_connected_at` datetime DEFAULT NULL COMMENT '最近一次成功连接时间',
                                   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                                   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
                                   `deleted` tinyint NOT NULL DEFAULT '0' COMMENT '逻辑删除:0-未删除,1-已删除',
                                   PRIMARY KEY (`id`),
                                   UNIQUE KEY `uk_connection_id` (`connection_id`),
                                   KEY `idx_user_id` (`user_id`),
+                                  KEY `idx_user_group` (`user_id`,`group_name`),
+                                  KEY `idx_user_favorite` (`user_id`,`favorite`),
                                   KEY `idx_status` (`status`),
                                   KEY `idx_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='SSH连接配置表';
@@ -172,6 +179,49 @@ CREATE TABLE `long_term_memory` (
                                     KEY `idx_user_time` (`user_id`,`updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='长期记忆表';
 
+
+
+# 转储表 operation_audit_log
+# ------------------------------------------------------------
+
+DROP TABLE IF EXISTS `operation_audit_log`;
+
+CREATE TABLE `operation_audit_log` (
+                                       `id` bigint NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+                                       `user_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'default' COMMENT '操作用户',
+                                       `connection_id` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '关联连接ID',
+                                       `connection_name` varchar(128) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '连接名快照',
+                                       `action` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '动作',
+                                       `resource` varchar(1024) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '资源(命令/路径/会话)',
+                                       `detail` varchar(2048) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '明细',
+                                       `risk_level` varchar(16) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'LOW' COMMENT '风险等级',
+                                       `success` tinyint NOT NULL DEFAULT '1' COMMENT '是否成功:0-否,1-是',
+                                       `duration_ms` bigint NOT NULL DEFAULT '0' COMMENT '耗时(毫秒)',
+                                       `client_ip` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '客户端IP',
+                                       `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发生时间',
+                                       PRIMARY KEY (`id`),
+                                       KEY `idx_user_time` (`user_id`,`created_at`),
+                                       KEY `idx_connection_time` (`connection_id`,`created_at`),
+                                       KEY `idx_action_time` (`action`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='操作审计日志';
+
+
+# 转储表 chat_task_state
+# ------------------------------------------------------------
+
+DROP TABLE IF EXISTS `chat_task_state`;
+
+CREATE TABLE `chat_task_state` (
+                                     `session_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '会话ID(主键)',
+                                     `root_intent` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '根意图枚举名',
+                                     `task_description` text COMMENT '任务锚点描述',
+                                     `steps` text COMMENT '步骤留痕(0x1F 分隔)',
+                                     `current_step_index` int NOT NULL DEFAULT '0' COMMENT '当前步骤下标',
+                                     `completed` tinyint NOT NULL DEFAULT '0' COMMENT '任务是否完成:0-否,1-是',
+                                     `last_feedback_failed` tinyint NOT NULL DEFAULT '0' COMMENT '最近反馈是否失败/回合中断:0-否,1-是',
+                                     `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                                     PRIMARY KEY (`session_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话任务态表';
 
 
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;

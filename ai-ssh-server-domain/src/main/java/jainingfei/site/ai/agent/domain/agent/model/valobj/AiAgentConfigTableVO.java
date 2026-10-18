@@ -87,6 +87,15 @@ public class AiAgentConfigTableVO {
              */
             private String reasoningEffort;
 
+            /** 采样温度（模型默认 = null） */
+            private Double temperature;
+
+            /** 单次回复最大 token 数（模型默认 = null） */
+            private Integer maxTokens;
+
+            /** 核采样 top-p（模型默认 = null） */
+            private Double topP;
+
             private List<ToolMcp> toolMcpList;
             private List<ToolSkills> toolSkillsList;
 
@@ -159,6 +168,13 @@ public class AiAgentConfigTableVO {
              * "只持有派发工具"的编排者（不再直挂 executeCommand），未声明者行为与旧版一致。
              */
             private List<String> subAgents;
+
+            /**
+             * 是否只读智能体（YAML 键 read-only）。
+             * <p>只读智能体不挂载 writeRemoteFile 工具；诊断类子智能体应设为 true，
+             * 让"只收集证据、不改系统"从提示词约束升级为工具边界。
+             */
+            private Boolean readOnly;
 
         }
 

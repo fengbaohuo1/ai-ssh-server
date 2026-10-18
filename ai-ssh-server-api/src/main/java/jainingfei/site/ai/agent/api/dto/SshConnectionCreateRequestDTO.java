@@ -2,6 +2,8 @@ package jainingfei.site.ai.agent.api.dto;
 
 import lombok.Data;
 
+import java.util.List;
+
 /**
  * SSH 连接创建请求 DTO
  */
@@ -31,6 +33,18 @@ public class SshConnectionCreateRequestDTO {
 
     /** 用户 ID */
     private String userId;
+
+    /** 分组 */
+    private String groupName;
+
+    /** 标签 */
+    private List<String> tags;
+
+    /** 备注 */
+    private String remark;
+
+    /** 是否收藏 */
+    private Boolean favorite;
 
     // ====== 高级配置（可选） ======
 

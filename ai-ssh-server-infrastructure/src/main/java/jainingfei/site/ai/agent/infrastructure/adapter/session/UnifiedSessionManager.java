@@ -253,6 +253,17 @@ public class UnifiedSessionManager implements ITerminalSessionPort {
         return session != null && !session.isClosed();
     }
 
+    /** 当前活跃终端会话数（运维概览使用） */
+    public int activeSessionCount() {
+        int count = 0;
+        for (UnifiedTerminalSession session : sessions.values()) {
+            if (session != null && !session.isClosed()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     // ==================== 内部 ====================
 
     /** 后台读取线程：根据模式写入对应缓冲区 + WebSocket 推送 */

@@ -38,6 +38,16 @@ public interface ISshConnectionRepository {
     void updateStatus(String connectionId, ConnectionStatusEnum status);
 
     /**
+     * 记录最近一次成功连接时间
+     */
+    void updateLastConnectedAt(String connectionId, java.time.LocalDateTime lastConnectedAt);
+
+    /**
+     * 统计用户的连接数量
+     */
+    long countByUserId(String userId);
+
+    /**
      * 删除连接（软删除）
      */
     void deleteByConnectionId(String connectionId);

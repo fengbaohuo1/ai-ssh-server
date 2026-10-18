@@ -1,0 +1,46 @@
+# =====================================================================
+# server —— 服务端部署模式（MySQL）
+#
+# 与 local 的差异：
+#   - 数据库连 MySQL（环境变量注入，默认本机 3306/ai_ssh）
+#   - 不做 schema 初始化（表结构由 docs/dev-ops/mysql/sql 下的脚本维护）
+#   - 外部配置同样从 ${AI_SSH_HOME}/config 读取（agent.yml + llm.yml 覆盖层）
+#   - 默认开启接口令牌鉴权
+# =====================================================================
+server:
+  port: ${SERVER_PORT:8091}
+
+thread:
+  pool:
+    executor:
+      config:
+        core-pool-size: 20
+        max-pool-size: 50
+        keep-alive-time: 5000
+        block-queue-size: 5000
+        policy: CallerRunsPolicy
+
+spring:
+  datasource:
+    url: ${AI_SSH_DB_URL:jdbc:mysql://127.0.0.1:3306/ai_ssh?useUnicode=true&characterEncoding=utf8&autoReconnect=true&zeroDateTimeBehavior=convertToNull&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${AI_SSH_DB_USERNAME:root}
+    password: ${AI_SSH_DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      # 服务端表结构交给 DBA 脚本，应用启动不执行 DDL
+      mode: never
+  config:
+    import:
+      - optional:file:${AI_SSH_HOME}/config/agent.yml
+      - optional:file:${AI_SSH_HOME}/config/llm.yml
+
+ai:
+  security:
+    auth-enabled: ${AI_SSH_AUTH_ENABLED:true}
+
+logging:
+  level:
+    root: info
+  config: classpath:logback-spring.xml
+  path: ${AI_SSH_HOME}/logs

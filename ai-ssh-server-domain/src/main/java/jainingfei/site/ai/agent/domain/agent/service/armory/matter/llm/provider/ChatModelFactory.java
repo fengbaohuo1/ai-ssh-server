@@ -43,6 +43,9 @@ public class ChatModelFactory {
     public ProviderProfile createMain(AiAgentConfigTableVO.Module.ChatModel chatModelConfig) {
         return create(chatModelConfig, ModelTuning.builder()
                 .reasoningEffort(chatModelConfig.getReasoningEffort())
+                .temperature(chatModelConfig.getTemperature())
+                .maxTokens(chatModelConfig.getMaxTokens())
+                .topP(chatModelConfig.getTopP())
                 .build());
     }
 

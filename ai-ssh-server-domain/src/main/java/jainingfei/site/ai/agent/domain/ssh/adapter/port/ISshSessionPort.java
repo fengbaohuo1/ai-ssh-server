@@ -1,6 +1,8 @@
 package jainingfei.site.ai.agent.domain.ssh.adapter.port;
 
 import com.jcraft.jsch.Session;
+import jainingfei.site.ai.agent.domain.ssh.model.entity.SshConnectionConfigEntity;
+import jainingfei.site.ai.agent.domain.ssh.model.entity.SshConnectionEntity;
 
 /**
  * ClassName:ISshSessionPort
@@ -28,6 +30,16 @@ public interface ISshSessionPort {
                     String password, String privateKey);
 
     /**
+     * 带高级配置建立连接（超时 / 保活 / 压缩 / 严格主机密钥）。
+     * <p>默认实现退回基础签名，便于替换实现平滑迁移。
+     */
+    default boolean connect(String connectionId, SshConnectionEntity connection,
+                            SshConnectionConfigEntity config) {
+        return connect(connectionId, connection.getHost(), connection.getPort(),
+                connection.getUsername(), connection.getPassword(), connection.getPrivateKey());
+    }
+
+    /**
      * 断开 SSH 连接
      *
      * @param connectionId 连接ID
@@ -49,4 +61,13 @@ public interface ISshSessionPort {
      * @return JSch Session，可能为 null
      */
     Session getSession(String connectionId);
+
+    /**
+     * 当前已建立的 SSH 会话数（运维概览 / 健康检查使用）
+     *
+     * @return 活跃会话数量
+     */
+    default int activeConnectionCount() {
+        return 0;
+    }
 }

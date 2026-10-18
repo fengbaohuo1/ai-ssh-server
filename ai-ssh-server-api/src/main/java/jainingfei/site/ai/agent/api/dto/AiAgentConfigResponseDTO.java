@@ -77,6 +77,37 @@ public class AiAgentConfigResponseDTO {
      */
     private List<String> plugins;
 
+    /**
+     * 内置工具清单（命令执行 / 文件读写 / 子智能体派发），供前端展示"这个智能体能做什么"
+     */
+    private List<String> builtinTools;
+
+    /**
+     * 运行期治理参数（会话治理 / 压缩 / 冷启动回放），只读展示
+     */
+    private RuntimeInfo runtime;
+
+    /**
+     * 配置健康检查告警（不影响启动的软问题，例如未配置上下文窗口）
+     */
+    private List<String> configWarnings;
+
+    @Data
+    public static class RuntimeInfo {
+        /** 单次 runAsync 的 LLM 调用上限 */
+        private Integer maxLlmCalls;
+        /** 事件压缩是否开启 */
+        private Boolean compactEnabled;
+        /** 压缩触发阈值（tokens） */
+        private Integer compactTokenThreshold;
+        /** 近端保留事件条数 */
+        private Integer compactEventRetentionSize;
+        /** 业务侧历史裁剪预算（tokens） */
+        private Integer contextTokenBudget;
+        /** 冷启动回放字符预算 */
+        private Integer coldStartReplayBudgetChars;
+    }
+
     @Data
     public static class ChatModelInfo {
         /** 模型通道 id（chat-model.provider，空配置回填默认通道） */
@@ -93,6 +124,12 @@ public class AiAgentConfigResponseDTO {
         private Long contextSize;
         /** 推理强度（chat-model.reasoning-effort，可为空=未配置） */
         private String reasoningEffort;
+        /** 采样温度（chat-model.temperature） */
+        private Double temperature;
+        /** 单次回复最大 token（chat-model.max-tokens） */
+        private Integer maxTokens;
+        /** 核采样 top-p（chat-model.top-p） */
+        private Double topP;
     }
 
     /**
@@ -127,6 +164,12 @@ public class AiAgentConfigResponseDTO {
         private List<String> delegates;
         /** 是否为编排者（声明了 sub-agents 的智能体不再持有 executeCommand） */
         private Boolean orchestrator;
+        /** 是否只读（不挂载 writeRemoteFile） */
+        private Boolean readOnly;
+        /** 该角色实际可用的内置工具 */
+        private List<String> tools;
+        /** 指令预览（截断，便于前端折叠查看） */
+        private String instructionPreview;
     }
 
     @Data

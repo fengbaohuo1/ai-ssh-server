@@ -11,7 +11,7 @@ public class LangChain4jApiTest {
     public void test() {
         OpenAiChatModel model = OpenAiChatModel.builder()
                 .baseUrl("https://api.deepseek.com")
-                .apiKey("sk-REDACTED")
+                .apiKey("sk-test")
                 .modelName("deepseek-v4-flash")
                 .build();
 

@@ -70,8 +70,10 @@ public class ChatHistoryRepository implements IChatHistoryRepository {
         chatMessageDao.insert(po);
 
         // 原子递增会话消息计数
+        // updated_at 显式写 Java 时间：MySQL 靠 ON UPDATE CURRENT_TIMESTAMP，本地 H2 库没有该语义
         chatSessionDao.update(null, new LambdaUpdateWrapper<ChatSessionPO>()
                 .eq(ChatSessionPO::getId, message.getSessionId())
+                .set(ChatSessionPO::getUpdatedAt, LocalDateTime.now())
                 .setSql("message_count = message_count + 1"));
     }
 

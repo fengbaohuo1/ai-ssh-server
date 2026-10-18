@@ -1,0 +1,37 @@
+# =====================================================================
+# local —— 测试专用覆盖（test classpath 优先级高于 main，同名文件整份生效）
+#
+# 背景：application-local.yml 用 ${AI_SSH_HOME} 指向桌面端数据目录，而
+# AI_SSH_HOME 由 Application.main() 在 Spring 启动前写入系统属性；
+# @SpringBootTest 不经过 main()，占位符无法解析会导致 Logback/数据源初始化失败。
+#
+# 因此测试侧覆盖 local 配置：
+#   - H2 内存库（不落任何真实用户数据，测试间隔离）
+#   - 日志写 target 下的临时目录
+#   - 不导入 ${AI_SSH_HOME}/config 下的外部配置
+# 生产/桌面端仍走 src/main/resources/application-local.yml。
+# =====================================================================
+server:
+  address: 127.0.0.1
+  port: 0
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:ai-ssh-test;MODE=MySQL;DATABASE_TO_LOWER=TRUE;NON_KEYWORDS=ROLE,VALUE,TYPE,KEY,STATUS;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema-h2.sql
+
+ai:
+  security:
+    auth-enabled: false
+
+logging:
+  level:
+    root: info
+  config: classpath:logback-spring.xml
+  path: ${java.io.tmpdir}/ai-ssh-test/logs

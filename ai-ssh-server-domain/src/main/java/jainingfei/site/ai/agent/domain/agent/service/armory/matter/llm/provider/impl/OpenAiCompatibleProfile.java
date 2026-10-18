@@ -73,6 +73,12 @@ public class OpenAiCompatibleProfile implements ProviderProfile {
         if (tuning != null && tuning.getTemperature() != null) {
             options.temperature(tuning.getTemperature());
         }
+        if (tuning != null && tuning.getMaxTokens() != null) {
+            options.maxTokens(tuning.getMaxTokens());
+        }
+        if (tuning != null && tuning.getTopP() != null) {
+            options.topP(tuning.getTopP());
+        }
 
         ChatModel chatModel = OpenAiChatModel.builder().options(options.build()).build();
         log.info("OpenAI 协议通道装配完成 | model:{} | baseUrl:{} | reasoningEffort:{} | temperature:{}",

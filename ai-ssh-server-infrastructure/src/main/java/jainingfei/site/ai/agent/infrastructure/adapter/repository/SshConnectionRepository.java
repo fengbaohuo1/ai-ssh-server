@@ -14,6 +14,9 @@ import jainingfei.site.ai.agent.infrastructure.dao.po.SshConnectionConfigPO;
 import jainingfei.site.ai.agent.infrastructure.dao.po.SshConnectionPO;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -77,6 +80,13 @@ public class SshConnectionRepository implements ISshConnectionRepository {
 
         if (existPO != null) {
             po.setId(existPO.getId());
+            // 本地 H2 无 ON UPDATE 语义：更新路径必须显式带时间，避免界面看到"永不变化"的更新时间
+            if (po.getUpdatedAt() == null) {
+                po.setUpdatedAt(LocalDateTime.now());
+            }
+            if (po.getCreatedAt() == null) {
+                po.setCreatedAt(existPO.getCreatedAt());
+            }
             sshConnectionDao.updateById(po);
         } else {
             sshConnectionDao.insert(po);
@@ -94,6 +104,9 @@ public class SshConnectionRepository implements ISshConnectionRepository {
 
         if (existPO != null) {
             po.setId(existPO.getId());
+            if (po.getUpdatedAt() == null) {
+                po.setUpdatedAt(LocalDateTime.now());
+            }
             sshConnectionConfigDao.updateById(po);
         } else {
             sshConnectionConfigDao.insert(po);
@@ -102,14 +115,33 @@ public class SshConnectionRepository implements ISshConnectionRepository {
 
     @Override
     public void updateStatus(String connectionId, ConnectionStatusEnum status) {
+        // updated_at 显式写 Java 时间：本地 H2 库没有 MySQL 的 ON UPDATE CURRENT_TIMESTAMP
         SshConnectionPO updatePO = new SshConnectionPO();
         updatePO.setStatus(status.getCode());
+        updatePO.setUpdatedAt(LocalDateTime.now());
 
         sshConnectionDao.update(
                 updatePO,
                 new LambdaQueryWrapper<SshConnectionPO>()
                         .eq(SshConnectionPO::getConnectionId, connectionId)
         );
+    }
+
+    @Override
+    public void updateLastConnectedAt(String connectionId, LocalDateTime lastConnectedAt) {
+        SshConnectionPO updatePO = new SshConnectionPO();
+        updatePO.setLastConnectedAt(lastConnectedAt);
+        updatePO.setUpdatedAt(LocalDateTime.now());
+        sshConnectionDao.update(updatePO,
+                new LambdaQueryWrapper<SshConnectionPO>()
+                        .eq(SshConnectionPO::getConnectionId, connectionId));
+    }
+
+    @Override
+    public long countByUserId(String userId) {
+        Long count = sshConnectionDao.selectCount(
+                new LambdaQueryWrapper<SshConnectionPO>().eq(SshConnectionPO::getUserId, userId));
+        return count == null ? 0L : count;
     }
 
     @Override
@@ -137,6 +169,11 @@ public class SshConnectionRepository implements ISshConnectionRepository {
                 .encrypted(intToBool(po.getEncrypted()))
                 .status(ConnectionStatusEnum.fromCode(po.getStatus()))
                 .userId(po.getUserId())
+                .groupName(po.getGroupName())
+                .tags(parseTags(po.getTags()))
+                .remark(po.getRemark())
+                .favorite(intToBool(po.getFavorite()))
+                .lastConnectedAt(po.getLastConnectedAt())
                 .createdAt(po.getCreatedAt())
                 .updatedAt(po.getUpdatedAt())
                 .deleted(intToBool(po.getDeleted()))
@@ -157,6 +194,11 @@ public class SshConnectionRepository implements ISshConnectionRepository {
         po.setEncrypted(boolToInt(entity.getEncrypted()));
         po.setStatus(entity.getStatus() != null ? entity.getStatus().getCode() : null);
         po.setUserId(entity.getUserId());
+        po.setGroupName(entity.getGroupName());
+        po.setTags(joinTags(entity.getTags()));
+        po.setRemark(entity.getRemark());
+        po.setFavorite(boolToInt(entity.getFavorite()));
+        po.setLastConnectedAt(entity.getLastConnectedAt());
         po.setCreatedAt(entity.getCreatedAt());
         po.setUpdatedAt(entity.getUpdatedAt());
         po.setDeleted(boolToInt(entity.getDeleted()));
@@ -197,5 +239,29 @@ public class SshConnectionRepository implements ISshConnectionRepository {
 
     private Integer boolToInt(Boolean value) {
         return value != null ? (value ? 1 : 0) : null;
+    }
+
+    /** 逗号分隔标签 → 列表（去空、去重、保序） */
+    private static List<String> parseTags(String tags) {
+        if (tags == null || tags.isBlank()) {
+            return new ArrayList<>();
+        }
+        return Arrays.stream(tags.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    /** 列表 → 逗号分隔标签 */
+    private static String joinTags(List<String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return "";
+        }
+        return tags.stream()
+                .filter(t -> t != null && !t.isBlank())
+                .map(String::trim)
+                .distinct()
+                .collect(Collectors.joining(","));
     }
 }

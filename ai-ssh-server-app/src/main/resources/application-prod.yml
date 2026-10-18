@@ -1,3 +1,8 @@
+# =====================================================================
+# 历史 profile（v2 之前的模板），v3 起已由 application-server.yml 取代。
+# MySQL / 服务端部署请使用：--spring.profiles.active=server
+# 本文件未配置数据源（保持历史原样），直接启用会启动失败，仅作兼容保留。
+# =====================================================================
 server:
   port: 8091
 
@@ -39,3 +44,9 @@ logging:
   level:
     root: info
   config: classpath:logback-spring.xml
+
+# 生产默认开启接口鉴权与凭证加密：启动前必须注入
+#   AI_SECURITY_API_TOKEN / AI_SECURITY_CREDENTIAL_KEY
+ai:
+  security:
+    auth-enabled: ${AI_SECURITY_AUTH_ENABLED:true}

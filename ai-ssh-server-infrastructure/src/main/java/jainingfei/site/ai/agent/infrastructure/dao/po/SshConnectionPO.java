@@ -51,6 +51,21 @@ public class SshConnectionPO {
     /** 用户 ID */
     private String userId;
 
+    /** 主机分组 */
+    private String groupName;
+
+    /** 标签（逗号分隔） */
+    private String tags;
+
+    /** 备注 */
+    private String remark;
+
+    /** 是否收藏: 0-否, 1-是 */
+    private Integer favorite;
+
+    /** 最近一次成功连接时间 */
+    private LocalDateTime lastConnectedAt;
+
     /** 创建时间 */
     private LocalDateTime createdAt;
 

@@ -2,11 +2,94 @@
 
 ## 项目概述
 
-AI + SSH 的服务端项目，提供 SSH 连接的管理和操作能力。基于 DDD 四层架构设计。
+AI + SSH 的服务端项目，提供 SSH 连接管理、远程文件系统、操作审计与 AI 运维助手能力。基于 DDD 四层架构设计。
 
 - **Spring Boot 4.1.0** + **MyBatis-Plus 3.5.16** + **MySQL 8.0**
 - 包名：`jainingfei.site.ai.agent`
 - 模块：api / domain / infrastructure / trigger / types / app / case
+- 领域上下文：`ssh`（连接/终端）、`filesystem`（SFTP）、`security`（凭证加密/审计）、`agent`（ADK 装配）
+
+## v3 升级要点（桌面本地模式 / 存储双模式 / 模型可配置）
+
+- **存储双模式**：`application-local.yml`（默认：H2 文件库 `${AI_SSH_HOME}/data/ai-ssh` + `db/schema-h2.sql` 幂等建表）与 `application-server.yml`（MySQL，表结构走 `docs/dev-ops/mysql/sql`）。切换用 `AI_SSH_PROFILE` 或 `--spring.profiles.active`。
+- **应用数据目录**：`AiSshHome`（infrastructure.config）在 `Application.main()` 里**先于** `SpringApplication.run` 解析并创建 `data/ config/ logs/`，把绝对路径（正斜杠）写回 `AI_SSH_HOME` 系统属性；`application-local.yml` 的 H2 URL、`spring.config.import`、`logging.path` 都依赖它。**`@SpringBootTest` 不经过 main()**，测试侧用 `src/test/resources/application-local.yml`（内存 H2 + 临时日志目录）覆盖同名 main 配置。
+- **配置文件写接口**：`AgentConfigFileStore`（infrastructure.config）+ `AgentConfigController`（trigger，前缀 `/api/v1/agent/config`）：
+  - `agent.yml`：主配置（智能体/子智能体/MCP/技能/运行治理），读/写时做 YAML 语法 + `ai.agent.config.tables` 结构校验，写前备份 `.bak`，临时文件 + 原子替换。
+  - `llm.yml`：模型配置覆盖层，只写 `ai.agent.config.tables.<tableKey>.module.chat-model` 下的键；`spring.config.import` 顺序 `agent.yml` → `llm.yml`（同名键后者覆盖），所以表单保存不会重写 agent.yml、不会丢注释。
+  - `api-key` 只写不读：GET 只回传 `apiKeyConfigured`；保存返回 `restartRequired=true`，重启后生效。
+  - provider 取值唯一出处 `ProviderCapabilities`（`deepseek-native` / `openai-compatible`）；校验失败 `code=0002` + 原因。
+- **桌面打包约束**：服务端必须能以 `--spring.profiles.active=local` 零外部依赖启动（`java -jar`），客户端 `scripts/bundle-backend.ps1` 会把 jar 与 jlink JRE 打进 Tauri resources。
+- **表结构对齐**：本地 H2 与 MySQL 列级一致；v3 补齐 `chat_task_state`，存量库执行 `migration-v3.sql`（`init.sql` 已同步）。
+
+## v2 升级要点（安全 / 文件 / 审计 / 配置）
+
+```mermaid
+flowchart LR
+  T[trigger: HTTP/WS] --> D1[domain.ssh]
+  T --> D2[domain.filesystem]
+  T --> D3[domain.security]
+  T --> C[case: AI 回合]
+  C --> D4[domain.agent]
+  D1 --> I[infrastructure: JSch/MyBatis/AES]
+  D2 --> I
+  D3 --> I
+  D4 --> I
+```
+
+- **凭证加密**：`ICredentialCipher`（domain.security）→ `AesGcmCredentialCipher`（infrastructure），AES-256-GCM + `enc:v1:` 前缀；创建/更新时加密，连接前解密；历史明文值原样兼容。
+- **文件系统**：`IFileSystemService` + `RemotePathResolver` + `ISftpPort` → `JschSftpPort`；路径穿越/敏感目录/大小限额统一在领域服务拦截，所有写操作写审计。`rename` 同时承担移动：拒绝移动到自身/子目录、拒绝覆盖已存在目标，移动与重命名分别记 `FILE_MOVE` / `FILE_RENAME`。
+- **操作审计**：`IAuditService` → `AuditService` + `AuditLogRepository`；`AuditContext`（ThreadLocal）由 `AuditContextFilter` 注入 userId/clientIp。
+- **接口安全**：`SecurityProperties` + `ApiTokenFilter` + 全局 `CorsConfig`；WebSocket 握手与 HTTP 共用 CORS 白名单。
+- **智能体增强**：`chat-model.temperature/max-tokens/top-p` 真正下发；`agents[].read-only` 决定是否挂载 `writeRemoteFile`；配置回传增加工具清单、运行治理参数与配置告警。
+- **新增 AI 工具**：`listRemoteFiles` / `readRemoteFile` / `writeRemoteFile`，与 REST 文件系统复用同一领域服务。
+
+### 核心 API（新增）
+
+| 方法 | 端点 | 说明 |
+|---|---|---|
+| PUT | `/api/v1/ssh/connection/{id}` | 更新连接（部分更新，凭证留空保持） |
+| GET | `/api/v1/ssh/connection/groups?userId=` | 分组统计 |
+| GET | `/api/v1/sftp/{connectionId}/list` | 列目录 |
+| GET | `/api/v1/sftp/{connectionId}/stat` | 文件属性 |
+| GET | `/api/v1/sftp/{connectionId}/preview` | 文本预览（二进制识别） |
+| GET | `/api/v1/sftp/{connectionId}/download` | 下载（流式） |
+| POST | `/api/v1/sftp/{connectionId}/upload` | multipart 上传 |
+| POST | `/api/v1/sftp/{connectionId}/mkdir|rename|delete|write` | 写操作（`rename` 同时承担移动） |
+| GET | `/api/v1/audit/logs` | 审计分页（action/risk/connection 过滤） |
+| GET | `/api/v1/audit/actions` | 审计动作字典 |
+| GET | `/api/v1/system/overview` | 运行概览 |
+| GET | `/api/v1/system/health` | 健康检查（默认免鉴权） |
+| GET | `/api/v1/system/security` | 安全姿态（不含密钥） |
+
+### 数据库（v2 新增）
+
+- `ssh_connection` 新增：`group_name`、`tags`、`remark`、`favorite`、`last_connected_at`。
+- 新增 `operation_audit_log`：用户/连接/动作/资源/明细/风险/成功/耗时/客户端 IP。
+- 迁移脚本：`docs/dev-ops/mysql/sql/migration-v2.sql`；升级前 DDL 备份：`schema-backup-before-v2.sql`。
+
+### 安全配置
+
+```yaml
+ai:
+  security:
+    auth-enabled: false
+    credential-key: ${AI_SECURITY_CREDENTIAL_KEY:}
+    api-token: ${AI_SECURITY_API_TOKEN:}
+    sftp:
+      max-upload-bytes: 104857600
+      max-preview-bytes: 262144
+      blocked-paths: [/proc, /sys, /dev]
+    audit:
+      enabled: true
+```
+
+### 测试
+
+```bash
+mvn -pl ai-ssh-server-app -am \
+  "-Dtest=AesGcmCredentialCipherTest,RemotePathResolverTest,CommandGuardTest" \
+  "-Dsurefire.failIfNoSpecifiedTests=false" test
+```
 
 ## 总结存放要求
 

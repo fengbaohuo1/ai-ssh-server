@@ -46,7 +46,7 @@ public class LoopAgentTest {
         // Spring AI 1.0: OpenAiApi 已移除，所有配置通过 OpenAiChatOptions 完成
         OpenAiChatOptions options = OpenAiChatOptions.builder()
                 .baseUrl("https://api.deepseek.com")
-                .apiKey("sk-REDACTED")
+                .apiKey("sk-test")
                 .model("deepseek-v4-flash")
                 .build();
         ChatModel chatModel = OpenAiChatModel.builder()

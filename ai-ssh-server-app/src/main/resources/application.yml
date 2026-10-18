@@ -2,13 +2,48 @@ spring:
   config:
     name: ai-ssh-server-app
   profiles:
-    active: dev
+    # 默认 local（桌面端本地单机：H2 文件库 + ${AI_SSH_HOME}/config 外部配置，零依赖可启动）
+    # 服务端部署显式指定 --spring.profiles.active=server（MySQL）；开发者仍可用 dev
+    active: ${AI_SSH_PROFILE:local}
+  servlet:
+    multipart:
+      # SFTP 上传通道：与 ai.security.sftp.max-upload-bytes 保持一致
+      max-file-size: 100MB
+      max-request-size: 105MB
+
+# 平台安全（凭证加密 / 接口鉴权 / 文件系统边界 / 审计）
+# 生产环境通过环境变量注入：AI_SECURITY_CREDENTIAL_KEY / AI_SECURITY_API_TOKEN / AI_SECURITY_AUTH_ENABLED
+ai:
+  security:
+    auth-enabled: false            # 默认关闭：本地开发零配置；对外暴露时务必开启
+    credential-key: ${AI_SECURITY_CREDENTIAL_KEY:}
+    api-token: ${AI_SECURITY_API_TOKEN:}
+    public-endpoints:
+      - /api/v1/system/health
+    allowed-origins:
+      - http://localhost:1420
+      - http://127.0.0.1:1420
+      - http://tauri.localhost
+      - tauri://localhost
+      - https://tauri.localhost
+    sftp:
+      max-preview-bytes: 262144   # 256 KB
+      max-upload-bytes: 104857600 # 100 MB
+      max-list-entries: 5000
+      max-delete-depth: 32
+      timeout-seconds: 15
+      blocked-paths:
+        - /proc
+        - /sys
+        - /dev
+    audit:
+      enabled: true
+      max-query-limit: 200
 
 # 会话治理参数（教程 2-5/2-6 吸收 + W2 参数化；V3 托管循环回归后修订）
 # V3 起 ADK Runner 只持久化"聚合事件"（一次 LLM 调用一条），不再有流式碎片；
 # W4 压缩（compact.*）开启后长度治理交给 ADK 事件压缩引擎（滚动摘要 + 覆盖剪枝），
 # MAX_TURNS/MAX_EVENTS 丢头 trim 停用为兜底。
-ai:
   session-governance:
     max-events: 20            # ADK Session 最多保留的事件条数（压缩引擎启用后停用）
     max-turns: 4              # 最多保留的用户轮次（同上）
@@ -33,3 +68,12 @@ ai:
       # 只回放"最近一段"对话（user 回顾文本），不回放远古全量——
       # 避免把运行期已被压缩折叠的中远古区间"复活成全文"、避免首回合 token 暴涨
       replay-budget-chars: 12000
+
+# MyBatis-Plus 全局配置（所有 profile 共用；原先只在 dev 配置，本地 H2 模式同样需要逻辑删除）
+mybatis-plus:
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+

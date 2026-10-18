@@ -40,5 +40,9 @@ build/
 ### Logs ###
 **/data/log/
 
+### 运行期产物 ###
+# logback 在 logging.path 未解析时（例如某些测试上下文）会创建该目录
+log.path_IS_UNDEFINED/
+
 ### Mac OS ###
 .DS_Store

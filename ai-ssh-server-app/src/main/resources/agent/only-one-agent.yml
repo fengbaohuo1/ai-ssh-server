@@ -12,7 +12,7 @@ ai:
           module:
             chat-model:
               base-url: https://api.deepseek.com
-              api-key: sk-REDACTED
+              api-key: ${AI_SSH_LLM_API_KEY:}
               model: deepseek-v4-pro
               tool-mcp-list:
                 - remote:

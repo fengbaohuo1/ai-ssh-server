@@ -8,6 +8,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * SSH 连接实体 — 基础连接信息 + 认证凭证 + 系统管理信息
@@ -50,6 +51,21 @@ public class SshConnectionEntity {
 
     /** 用户ID */
     private String userId;
+
+    /** 主机分组（如 生产 / 测试 / 数据库） */
+    private String groupName;
+
+    /** 标签（如 核心、Redis、上海机房） */
+    private List<String> tags;
+
+    /** 备注 */
+    private String remark;
+
+    /** 是否收藏 */
+    private Boolean favorite;
+
+    /** 最近一次成功连接时间 */
+    private LocalDateTime lastConnectedAt;
 
     /** 创建时间 */
     private LocalDateTime createdAt;

@@ -19,7 +19,7 @@ public class SpringAiApiTest {
         ChatModel chatModel = OpenAiChatModel.builder()
                 .options(OpenAiChatOptions.builder()
                         .baseUrl("https://api.deepseek.com")
-                        .apiKey("sk-REDACTED")
+                        .apiKey("sk-test")
                         .model("deepseek-v4-flash")
                         .build())
                 .build();

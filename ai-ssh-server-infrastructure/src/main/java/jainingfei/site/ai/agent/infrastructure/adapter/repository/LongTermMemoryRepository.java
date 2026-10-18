@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -49,6 +50,8 @@ public class LongTermMemoryRepository implements ILongTermMemoryRepository {
         existPO.setConfidence(memoryEntity.getConfidence() != null
                 ? BigDecimal.valueOf(memoryEntity.getConfidence()) : null);
         existPO.setHitCount((existPO.getHitCount() == null ? 0 : existPO.getHitCount()) + 1);
+        // updated_at 显式写 Java 时间：本地 H2 库没有 MySQL 的 ON UPDATE CURRENT_TIMESTAMP
+        existPO.setUpdatedAt(LocalDateTime.now());
         longTermMemoryDao.updateById(existPO);
     }
 

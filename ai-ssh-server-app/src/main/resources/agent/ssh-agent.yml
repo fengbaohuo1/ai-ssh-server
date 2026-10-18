@@ -17,12 +17,18 @@ ai:
               #                     （例：https://api.moonshot.cn/v1 · http://127.0.0.1:8000/v1）
               provider: deepseek-native
               base-url: https://api.deepseek.com
-              api-key: sk-REDACTED
+              api-key: ${AI_SSH_LLM_API_KEY:}
               model: deepseek-flash
               # 模型上下文窗口（tokens），供前端配置信息展示；与会话治理压缩阈值（compact.token-threshold）相互独立
               context-size: 128000
               # 推理强度：deepseek-native 通道取值 high / max；openai-compatible 通道原样透传（minimal/low/medium/high…）
               reasoning-effort: High
+              # 采样参数（可选；留空则跟随模型默认）。temperature/top-p 在思考模式下可能被服务端忽略，
+              # 这里作为显式配置与前端只读展示使用。
+              temperature: 0.3
+              top-p: 0.95
+              # 单次回复最大 token 数（留空跟随模型默认）
+              max-tokens: 8192
 #              tool-skills-list:
 #                 - type: resource
 #                   path: agent/skills
@@ -75,27 +81,33 @@ ai:
               # 诊断专家：只读证据收集（职责边界由工具与提示词共同保证）
               - name: sshDiagnosisAgent
                 description: SSH 故障诊断子智能体，负责收集证据、定位原因并给出修复建议
+                # 只读边界：不挂载 writeRemoteFile，文件写入只能由变更智能体执行
+                read-only: true
                 instruction: |
                   你是 SSH 故障诊断子智能体。只执行只读诊断命令，定位问题并输出简洁结论。
 
                   执行规则：
                   1. 使用 executeCommand 工具收集系统环境、服务状态、日志、网络或资源信息
-                  2. 不执行安装、重启、删除、写入等任何变更类命令
-                  3. 每次只执行一条命令，等待结果后再决定下一步
-                  4. 输出包含：结论、关键证据、风险提示、建议的下一步修复操作
+                  2. 需要查看配置文件或日志片段时，优先用 listRemoteFiles / readRemoteFile（结构化、无需解析 ls/cat 输出）
+                  3. 不执行安装、重启、删除、写入等任何变更类命令
+                  4. 每次只执行一条命令，等待结果后再决定下一步
+                  5. 输出包含：结论、关键证据、风险提示、建议的下一步修复操作
                 output-key: ssh_diagnosis_result
 
               # 变更专家：只执行父智能体明确派发的变更
               - name: sshChangeAgent
                 description: SSH 变更执行子智能体，负责执行明确的安装、配置、重启和修复操作
+                read-only: false
                 instruction: |
                   你是 SSH 变更执行子智能体。只执行父智能体已经明确派发的变更任务。
 
                   执行规则：
                   1. 使用 executeCommand 工具执行"变更前检查 → 变更命令 → 变更后验证"
-                  2. 不扩大任务范围，不执行派发内容之外的危险命令
-                  3. 失败时先分析原因、给出最小修复步骤，不要盲目重复执行（写操作不幂等）
-                  4. 输出包含：执行结果、验证结果、回滚建议
+                  2. 修改配置文件时可用 readRemoteFile 先读取原文，再用 writeRemoteFile 覆盖写入；
+                     写入前确认路径，写完必须读回或执行验证命令
+                  3. 不扩大任务范围，不执行派发内容之外的危险命令
+                  4. 失败时先分析原因、给出最小修复步骤，不要盲目重复执行（写操作不幂等）
+                  5. 输出包含：执行结果、验证结果、回滚建议
                 output-key: ssh_change_result
             runner:
               agent-name: sshOperator
