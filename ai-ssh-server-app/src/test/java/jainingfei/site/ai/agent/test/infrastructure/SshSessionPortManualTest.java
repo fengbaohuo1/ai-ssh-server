@@ -32,7 +32,7 @@ public class SshSessionPortManualTest {
      * 这里的 IP、账号要换成你自己的云服务器；
      * <a href="http://618.gaga.plus/">http://618.gaga.plus/</a>
      */
-    private static final String HOST = "106.54.3.66";
+    private static final String HOST = "192.0.2.10";
     private static final int PORT = 22;
     private static final String USERNAME = "root";
     private static final String CONNECTION_ID = "manual-ssh-test";

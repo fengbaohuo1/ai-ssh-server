@@ -195,7 +195,7 @@ SshConnectionAggregate
 ### 数据库
 
 ```
-MySQL 8.0 — 106.54.3.66:13306 / ai_ssh
+MySQL 8.0 — 192.0.2.10:13306 / ai_ssh
 MyBatis-Plus 逻辑删除字段: deleted (0-未删, 1-已删)
 ```
 

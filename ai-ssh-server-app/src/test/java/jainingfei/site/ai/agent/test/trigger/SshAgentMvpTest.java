@@ -35,7 +35,7 @@ import java.util.UUID;
 public class SshAgentMvpTest {
 
     // ==================== 配置区：改成你自己的服务器 ====================
-    private static final String SSH_HOST = "106.54.3.66";
+    private static final String SSH_HOST = "192.0.2.10";
     private static final int SSH_PORT = 22;
     private static final String SSH_USERNAME = "root";
     private static final String SSH_PASSWORD = "Jnf-1607292542";
