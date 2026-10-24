@@ -46,6 +46,13 @@ AI + SSH 的服务端项目，提供 SSH 连接管理、远程文件系统、操
 - **子智能体执行痕迹（减少父智能体重复执行）**：`SubAgentResultExtractor#appendCommandTrace` 在子智能体结果尾部追加 `[子智能体执行痕迹]`（`MAX_TRACE_CALLS=15`、`MAX_TRACE_CHARS=1500`、单条 120 字符，逐条列 `name: <command 或参数> → 成功(exit=N)/失败: err/未返回结果`），`SubAgentDispatchService` 完成任务时写回 `task.setResult(...)`；文案明确"已成功且结果够用的不要再执行"。⚠️ 结果总长按 `MAX_RESULT_CHARS + MAX_TRACE_CHARS` 裁剪，痕迹在尾部会被优先保留；改痕迹格式时同步模板与 live 配置里"汇总与安全"的说明。
 - **AppException 现在带 message**：`AppException(code, message[, cause])` 调用 `super(message)`；此前只写 `info` 字段，`e.getMessage()` 恒为 null，工具失败返回 `error=null`、日志丢原因。`ReadRemoteFileTool` 失败时对空消息兜底用异常类名并回 `读取失败：<原因>（path=...）`。⚠️ 新增异常分支不要假设 `getMessage()` 一定非空。
 
+## 依赖与打包体积（2026-10 实测；结论：300 MB 可接受，暂不优化）
+
+- 组成：jar 280 MB（348 个 lib）+ jlink JRE 77.5 MB + exe 8.9 MB → NSIS 300 MB。安装包≈各部件之和（jar/JRE 已压缩）。
+- 体积主要来自 ADK 带入但未使用的厂商/云集成（Vertex/AI Platform protos 37、gRPC 23、google-cloud 27、anthropic+kotlin 14.5、eclipse/arrow 16.7、docker+BouncyCastle 10.8、adk-dev 12 MB）；`openai-java` 50 MB 是 `spring-ai-openai` 真需求，`google-genai` 是 ADK 事件类型必需。
+- 以后要瘦身（已实测可行）：① 根 `pom.xml` 给 `com.google.adk:google-adk` 加 exclusions（保留 `google-genai`、`grpc-netty-shaded`），jar 280→145 MB；② adk-dev/sample/langchain4j 降 `test` scope，lombok 改 `provided`；③ 客户端侧见 `ai-ssh-client/AGENTS.md` 的打包说明。落地后跑纯 JVM 单测 + 启动装配 + 一次真机对话。
+- 打包坑：先停占用 `target/ai-ssh-server-app.jar` 的后端进程，否则 Maven 会产出残缺 jar 再报错。
+
 ## v2 升级要点（安全 / 文件 / 审计 / 配置）
 
 ```mermaid
