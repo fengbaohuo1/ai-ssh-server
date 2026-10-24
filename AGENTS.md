@@ -2,212 +2,74 @@
 
 ## 项目概述
 
-AI + SSH 的服务端项目，提供 SSH 连接管理、远程文件系统、操作审计与 AI 运维助手能力。基于 DDD 四层架构设计。
+AI + SSH 服务端：SSH 连接管理、远程文件、操作审计、AI 运维助手。DDD 分层，包名 `jainingfei.site.ai.agent`。
 
-- **Spring Boot 4.1.0** + **MyBatis-Plus 3.5.16** + **MySQL 8.0**
-- 包名：`jainingfei.site.ai.agent`
-- 模块：api / domain / infrastructure / trigger / types / app / case
-- 领域上下文：`ssh`（连接/终端）、`filesystem`（SFTP）、`security`（凭证加密/审计）、`agent`（ADK 装配）
+- **Spring Boot 4.1.0** + **MyBatis-Plus 3.5.16** + MySQL 8 / H2 双模式
+- 模块：api / domain / infrastructure / trigger / case / types / app
+- 领域：`ssh`（连接/终端）、`filesystem`（SFTP）、`security`（凭证/审计）、`agent`（ADK 装配）
 
-## v3 升级要点（桌面本地模式 / 存储双模式 / 模型可配置）
+## 架构速览
 
-- **存储双模式**：`application-local.yml`（默认：H2 文件库 `${AI_SSH_HOME}/data/ai-ssh` + `db/schema-h2.sql` 幂等建表）与 `application-server.yml`（MySQL，表结构走 `docs/dev-ops/mysql/sql`）。切换用 `AI_SSH_PROFILE` 或 `--spring.profiles.active`。
-- **应用数据目录**：`AiSshHome`（infrastructure.config）在 `Application.main()` 里**先于** `SpringApplication.run` 解析并创建 `data/ config/ logs/`，把绝对路径（正斜杠）写回 `AI_SSH_HOME` 系统属性；`application-local.yml` 的 H2 URL、`spring.config.import`、`logging.path` 都依赖它。**`@SpringBootTest` 不经过 main()**，测试侧用 `src/test/resources/application-local.yml`（内存 H2 + 临时日志目录）覆盖同名 main 配置。
-- **配置文件写接口**：`AgentConfigFileStore`（infrastructure.config）+ `AgentConfigController`（trigger，前缀 `/api/v1/agent/config`）：
-  - `agent.yml`：主配置（智能体/子智能体/MCP/技能/运行治理），读/写时做 YAML 语法 + `ai.agent.config.tables` 结构校验，写前备份 `.bak`，临时文件 + 原子替换。
-  - `llm.yml`：模型配置覆盖层，只写 `ai.agent.config.tables.<tableKey>.module.chat-model` 下的键；`spring.config.import` 顺序 `agent.yml` → `llm.yml`（同名键后者覆盖），所以表单保存不会重写 agent.yml、不会丢注释。
-  - `api-key` 只写不读：GET 只回传 `apiKeyConfigured`；保存成功后**立即热重装**（见下条），无需重启。
-  - provider 取值唯一出处 `ProviderCapabilities`（`deepseek-native` / `openai-compatible`）；校验失败 `code=0002` + 原因。
-- **配置热重装（v3.1）**：保存 agent.yml / llm.yml 后 trigger 发布 `AgentConfigChangedEvent`（domain.agent.model.event），app 层 `AiAgentAutoConfig#onAgentConfigChanged` 同步消费：`AgentConfigFileStore.loadEffectiveProperties()` 重新读取合并后的有效配置 → 刷新 `AiAgentAutoConfigProperties` Bean（配置列表/概览随之更新）→ 重新走装配链。装配链天然支持覆盖：`registerBean` 先移除同名 Bean、`AgentCatalog.register` 覆盖登记、`CustomAdkSessionService` 共享单例，所以新对话轮次立即生效且不丢 ADK 会话；失败时保留旧装配并回传原因（`applied=false` + `applyMessage`），也可 `POST /api/v1/agent/config/reload` 手动重装。
-- **桌面打包约束**：服务端必须能以 `--spring.profiles.active=local` 零外部依赖启动（`java -jar`），客户端 `scripts/bundle-backend.ps1` 会把 jar 与 jlink JRE 打进 Tauri resources。
-- **表结构对齐**：本地 H2 与 MySQL 列级一致；v3 补齐 `chat_task_state`，存量库执行 `migration-v3.sql`（`init.sql` 已同步）。
+- AI 回合：`case` 层节点链 Root → AiCall → ToolCall → LoopDecision → UserFeedback；循环在 ADK Runner 内部。
+- 智能体装配：`app` 层 `AiAgentAutoConfig` 读 `agent.yml` + `llm.yml` → `AgentNode` 二段式装配（leaf 工具集 → 派发工具集），`registerBean` 覆盖式注册、`CustomAdkSessionService` 共享 ADK 会话；配置保存后发 `AgentConfigChangedEvent` 热重装。
+- SSH：`UnifiedSessionManager`（ChannelShell 人机共用终端 / ChannelExec 供 AI 结构化执行）；`SshExecuteAdkTool` 为 prototype bean，按 agent 注入 `readOnly`。
+- 存储：local=H2（`db/schema-h2.sql` 幂等建表），server=MySQL（脚本在 `docs/dev-ops/mysql/sql`）；`AiSshHome` 在 `Application.main()` 中先于 Spring 创建 `${AI_SSH_HOME}/{data,config,logs}`（`@SpringBootTest` 不经过 main，测试用 `src/test/resources/application-local.yml`）。
 
-## v3.2 升级要点（智能体能力：派发模式 / 只读拦截 / 结构化执行）
+## 关键约束（改代码前必看）
 
-- **`delegate-mode`（子智能体派发模式）**：`AiAgentConfigTableVO.Module.Agent` 新增 `delegateMode`，取值 `hybrid`（默认）/ `dispatch-only`（空值按 hybrid）。`AgentNode#buildAgentTools` 二段式装配：第一段所有 agent 先按 leaf 工具集构建（`leafToolList`：`executeCommand` + `listRemoteFiles` + `readRemoteFile`，非只读再加 `writeRemoteFile`，包 `StaticToolset` 并合并 MCP 工具集）；第二段对声明了 `sub-agents` 的 agent 覆盖同名 Bean——`hybrid` 追加 leaf 工具 + 三个派发工具（`dispatchSubAgent` / `dispatchSubAgents` / `planAndDispatchSubAgents`），`dispatch-only` 只保留派发工具。非法取值在装配期抛 `IllegalArgumentException`（fail-fast），接口回传非法值时 `AgentRoleInfo` 的 `delegateMode` 为 null 并进"配置告警"。⚠️ 改动工具语义时必须同步 `AgentServiceController#toolsFor(orchestrator, delegateMode, readOnly)` 与客户端 `AgentConfigSidebar` 的角色徽标（可直连 / 仅派发）。
-- **`read-only` 命令级拦截**：`AgentNode` 用的 `SshExecuteAdkTool` 是 `@Scope("prototype")` bean，`AgentNode` 经 `ObjectProvider<SshExecuteAdkTool>` 取得实例并 `setReadOnly(...)`，所以每个 agent 的只读策略互不影响。`doExecute` 顺序：会话存在 → `CommandGuard.isDangerous`（危险命令）→ 只读时 `CommandGuard.isMutating`（写操作）拒绝 → `execCommandDetailed`。`isMutating` 是应用层护栏（文件变更 / 包管理 / 服务 / 权限 / 挂载 / docker/kubectl / git 写 / curl 上传），不是 OS 沙箱。
-- **SSH 执行结构化**：`SshCommandResult`（domain.ssh.model.valobj，`stdout/stderr/exitStatus/timedOut/truncated`）+ `ITerminalSessionPort#execCommandDetailed`；`UnifiedSessionManager` 用 `ChannelExec` 同时收集 stdout/stderr，循环内检查超时与输出上限；`ai.ssh.exec.timeout-seconds`（默认 300）、`ai.ssh.exec.max-output-bytes`（默认 262144）。成功判定改由 `CommandOutcomeAnalyzer.isSuccessful(SshCommandResult)` 以退出码为准，文本启发式只做兜底。
-- **派发结果治理**：`SubAgentResultExtractor.pickFinalText` 用 `TextRetentionUtil.retainHeadTail` 截到 12000 字符；`BatchSubAgentDispatchTool` 的 LLM-visible schema 已移除 `maxRetries`（内部重试/超时保留）。
-- **ReAct 回合成功判据**（case 层）：`ToolCallNode#handleIntentFeedback(..., boolean executionOk)` 以工具执行结果决定成功，不再从结果文本反推；`AiCallNode#get()` 仅在 `stopReason != null && toolResultsCollected.isEmpty()` 时跳过工具后置处理。
+- 配置写入顺序：**校验 → ensure → 备份 → 原子写**；校验失败不落盘、不产生 `.bak`；热重装失败保留旧装配。
+- 新增派发工具或会话入口必须同步 `DispatchBudget.beginTurn`；工具语义变化必须同步 `AgentServiceController#toolsFor` 与客户端角色徽标。
+- 新增写操作正则必须用 `CommandGuard.CMD_START` 前缀（`DANGEROUS_PATTERN` 除外，保持宽松）。
+- `read-only` agent 默认不挂载 MCP，确认只读安全才加 `mcp-readonly-safe: true`。
+- 新增发 `tool_call` 的路径必须同时 `DynamicContext.markStepStarted(id, name)`，否则回合收口补发看不到。
+- `DynamicContext.currentCallText` 只是单次 LLM 调用的文本累积器，不能当回合累积器。
+- 新增异常分支不要假设 `getMessage()` 非空（`AppException` 已改为 `super(message)`）。
+- `threadPoolExecutor` 线程数必须 ≥ 编排器并发，否则提交前 acquire 会卡死。
 
-## v3.3 升级要点（派发预算 / 绑定自愈 / 配置与运行时健壮性）
-
-- **派发预算（运行时硬约束）**：`domain.agent.support.DispatchBudget`，每轮 `MAX_DISPATCH_CALLS_PER_TURN=2` / `MAX_CHILD_TASKS_PER_TURN=6` / `MAX_TASKS_PER_AGENT_PER_TURN=4`，同轮"同 agent + 同请求"去重；`CHILD_SESSION_PREFIX="subagent-"` 会话内再派发一律拒绝。`ChatService` 在每次请求入口 `DispatchBudget.beginTurn(sessionId)`（同步 / 4 参流式 / 5 参流式三处）；三个派发工具在 `runAsync` 开头先 `sessionIdOf(ToolContext)` 再查预算，`BatchSubAgentDispatchTool` 部分被拦时返回 `budgetRejected` 明细、全被拦返回 `success=false`，`DynamicPlanDispatchTool` 在调用规划器 LLM **之前**就检查预算。⚠️ 新增派发工具或改变会话入口时必须同步 `beginTurn`。
-- **会话绑定自愈**：`ChatService#handleMessageStream(5 参)` 在请求未带 `terminalSessionId` 时回退 `SshSessionBindings.connectionOf(sessionId)`（日志"回退到会话上次绑定"）；完全没有绑定则注入 `<server_context>` 未绑定提示。`UserFeedbackNode#cleanup` **不再** `SshSessionBindings.unbindSession` / `unbindTerminalSession`（保留绑定让 `RootNode` 恢复分支生效），只在 `CustomAdkSessionService#deleteSession` 里解绑。⚠️ `SshSessionBindings.SESSION_CONNECTIONS` 现在随会话数增长（每会话一条，无 TTL），后续如需清理走 `deleteSession` 或加会话 TTL。
-- **配置前置校验**：`infrastructure.config.AgentConfigValidator`（`validateOrThrow` / 静态 `validate`，最多 20 条错误）校验 tables、chat-model（provider/model，可回退 `llm.yml` 覆盖层 `readOverlayChatModels`）、tool-mcp-list（三选一 + name + remote.url/stdio.command + `mcp-readonly-safe` 必须 Boolean）、agent（重名 / instruction / delegate-mode / sub-agents 引用）、agent-workflows、`runner.agent-name`。`AgentConfigFileStore#writeAgentContent` 顺序：**校验 → ensure → 备份 → 原子写**，校验失败不落盘也不产生 `.bak`。`AiAgentAutoConfig` 改为"先装配成功再 `setEnabled/setTables`"，失败保留旧装配。
-- **MCP 只读边界与回收**：`AiAgentConfigTableVO.Module.ChatModel.ToolMcp#mcpReadonlySafe`（YAML `mcp-readonly-safe`，默认 false）。`AgentNode#mcpToolsetsFor` 对 `readOnly` 智能体默认跳过 MCP（INFO 日志含原因），`mcp-readonly-safe: true` 才挂载；`AgentNode` 维护 `activeToolsets` 登记表，`ArmoryService` 在 `handler.apply` 成功后 `recyclePreviousMcpToolsets` 回收本类登记的旧 toolset（`close()` 幂等/null 安全），失败路径不回收。ADK `BaseAgent` 只有 Rx `close()`、不实现 `AutoCloseable`，本轮不回收旧 Agent。
-- **编排器健壮性**：`DynamicAgentOrchestrator` 信号量改为提交前 `acquire`（`RejectedExecutionException` → release + FAILED + log.error）；每任务 `get(timeoutSeconds)`、整轮总超时 Σ+5s，超时 `cancel(true)` 且 finally 用超时结论覆盖状态（防 COMPLETED 掩盖 FAILED）；`SubAgentDispatchService` 的 Rx 订阅走自有 daemon `SUBSCRIBE_SCHEDULER`，超时 `disposable.dispose()` 真正取消上游；`PlannerAgentBuilder` 用 `CountDownLatch + Disposable` 实现 60s 可取消等待。⚠️ `threadPoolExecutor` 线程数必须 ≥ 计划并发，否则提交前 acquire 会卡住。
-- **审计上下文传播**：`domain.security.support.AuditContext` 改为 `Holder(userId, clientIp, connectionId)` + `capture()/restore()/wrap(Runnable)/wrap(Callable)`（空 userId→`default`、空 IP→`local`）；新增 `domain.agent.support.AgentTaskContextPropagator`（`SCOPE` ThreadLocal + `bind()` 返 AutoCloseable + `wrap()` + `captureCurrent()`，scope 形如 `userId@appName/agentName`）。`DynamicAgentOrchestrator` 提交时 `captureCurrent`、执行时 `bind`；`AuditService` 新增 `defaultUser/defaultClientIp/defaultConnectionId` 兜底读 `AuditContext`。`CommandGuard` 空命令熔断 key 改为 `scope + '\0' + connectionId`，`onEmptyCommandDecision` 返回的 `EmptyCommandDecision#success()` 恒 false。
-- **环境采集按连接缓存**：`TerminalStateProvider`（domain，context provider order=10）把 `uname -srm` / `whoami` / `pwd` 三条同步 SSH 采集结果按 `connectionId` 缓存 `CACHE_TTL_MS=3s`（`LinkedHashMap` access-order，`MAX_CACHE_ENTRIES=64` 有界 LRU），命中返回 `new HashMap<>()` 副本；提供 `invalidate(connectionId)` / `invalidateAll()` / `cachedConnections()`，`cacheTtlMs()` 为 `protected` 便于测试覆写。构建动态上下文一回合内可能多次组装，此前每回合固定 3 次 SSH；现在同一 TTL 窗口最多 3 次，环境信息最多滞后 3 秒。单测 `TerminalStateProviderTest`（假 `ISshTerminalService` 计数，无 Spring）。
-- **只读拦截误杀修正（真实服务器实测）**：`CommandGuard.MUTATING_PATTERNS` 里防火墙类命令拆成"查询放行 / 变更拦截"——`iptables -L/-S`、`nft list`、`ufw status`、`firewall-cmd --list-*/--state` 放行；`-A/-I/-D/-P/-F/-N/-X/-Z`、`nft add/flush`、`ufw allow/disable`、`firewall-cmd --add-/--remove-/--reload` 拦截。该正则**必须大小写敏感**：`-n/-f/-x/-z` 是查询/展示选项，把 `-N/-F/-X/-Z` 写成大小写不敏感会误拦一切 `iptables -L -n`。输出重定向正则改为 `(?<![-<>=])>{1,2}\\s*(?!&|/dev/null\\b|[0-9])`，避免把文本箭头 `->` / `=>`（`find -printf '%p -> %l'`、`docker inspect --format '... -> ...'`）当成写文件。另：`BatchSubAgentDispatchTool` 的描述里直接给出 `agentName` 可选值与参数示例（实测模型首轮会写成 `agent`/`id`，白白浪费一个回合）。
-- **ReAct 层（case module）**：新增 `TurnToolSummaryCache`（回合末存"最近一轮工具摘要"、下一回合 `AiCallNode#appendPreviousToolSummary` 注入，修 `[工具执行摘要]` 恒空）、`DynamicSuffixBudget`（后缀 2000 字符预算：单节 800、关键错误行抢救到 `[关键错误信息]`、按 `[最近执行的命令]→[长期记忆]→[系统环境]→[当前任务]→[工具执行摘要]` 顺序丢节，未超预算逐字节原样返回）、`TurnCancelledException`。`SseSteps.emit` 返回 boolean 并在发送失败时 `cancel()`；`AiCallNode#consumeEvents` 用 `subscribe + CountDownLatch + 取消钩子` 替代 `blockingForEach`（取消时 `dispose` 上游、`stopReason="cancelled"`）；`AIAgentReActServiceCase#chat` 失败抛 `AppException(UN_ERROR)`；`LoopDecisionNode` 在 error/cancelled 时 `markTaskInterrupted`，归档前校验"最后一条工具结果成功 + 意图一致"。⚠️ `DynamicContext.currentCallText` 是"单次 LLM 调用"文本累积器，不要当回合累积器用。
-- **命令起始锚定（第二轮只读误杀修正）**：`CommandGuard` 的写操作模式统一用 `CMD_START = "(?:^|[;&|(\\n])\\s*(?:(?:sudo|nohup|exec|command|time)\\s+)*(?:(?:then|do|else)\\s+)?"` 当前缀——旧前缀 `[\s;&|("'`]` 把**任意空白**都当边界，于是参数/文本里的动词被判定成写操作（`last reboot`、`grep -i reboot /var/log/messages`、`cat /proc/mounts` 在只读智能体里被误拦）。刻意**不把引号当边界**（`journalctl --since 'reboot'`、`grep "cp " file` 不能误判）。收紧后的漏拦用间接执行模式兜住：`xargs ... <写动词>`、`find ... -exec <写动词>`；动词结尾边界改用 `(?![\\w-])`，`reboot;` / `rm;` 能命中而 `rebooting` 不误命中。⚠️ 新增 `MUTATING_PATTERNS` 必须用 `CMD_START`，不要再用 `[\s...]` 前缀；`CommandGuard.DANGEROUS_PATTERN` 仍保留宽松前缀（灾难命令宁可误拦）。
-- **回合收口补发悬挂工具步（修 `[NO_RESULT]`）**：`DefaultReActFactory.DynamicContext` 增加 `stepNames` 与 `drainUnfinishedSteps()`（返回 `record UnfinishedStep(String id, String name, long elapsedMs)`），`takeStepElapsedMs` 同时清名字；`AiCallNode` 改用 `markStepStarted(id, name)`；`UserFeedbackNode#completeDanglingToolSteps` 在回合收口时，把"已发 `tool_call` 但没收到 FunctionResponse"的步骤补发一条合成 `tool_result`（`success=false`、`finishReason=missing_result`，文案说明可能超时/被取消/上游事件丢失），避免前端长期显示 running、模型误以为有结果。⚠️ 新增发 `tool_call` 的路径必须同时 `markStepStarted`，否则补发逻辑看不到它。
-- **子智能体执行痕迹（减少父智能体重复执行）**：`SubAgentResultExtractor#appendCommandTrace` 在子智能体结果尾部追加 `[子智能体执行痕迹]`（`MAX_TRACE_CALLS=15`、`MAX_TRACE_CHARS=1500`、单条 120 字符，逐条列 `name: <command 或参数> → 成功(exit=N)/失败: err/未返回结果`），`SubAgentDispatchService` 完成任务时写回 `task.setResult(...)`；文案明确"已成功且结果够用的不要再执行"。⚠️ 结果总长按 `MAX_RESULT_CHARS + MAX_TRACE_CHARS` 裁剪，痕迹在尾部会被优先保留；改痕迹格式时同步模板与 live 配置里"汇总与安全"的说明。
-- **AppException 现在带 message**：`AppException(code, message[, cause])` 调用 `super(message)`；此前只写 `info` 字段，`e.getMessage()` 恒为 null，工具失败返回 `error=null`、日志丢原因。`ReadRemoteFileTool` 失败时对空消息兜底用异常类名并回 `读取失败：<原因>（path=...）`。⚠️ 新增异常分支不要假设 `getMessage()` 一定非空。
-
-## 依赖与打包体积（2026-10 实测；结论：300 MB 可接受，暂不优化）
-
-- 组成：jar 280 MB（348 个 lib）+ jlink JRE 77.5 MB + exe 8.9 MB → NSIS 300 MB。安装包≈各部件之和（jar/JRE 已压缩）。
-- 体积主要来自 ADK 带入但未使用的厂商/云集成（Vertex/AI Platform protos 37、gRPC 23、google-cloud 27、anthropic+kotlin 14.5、eclipse/arrow 16.7、docker+BouncyCastle 10.8、adk-dev 12 MB）；`openai-java` 50 MB 是 `spring-ai-openai` 真需求，`google-genai` 是 ADK 事件类型必需。
-- 以后要瘦身（已实测可行）：① 根 `pom.xml` 给 `com.google.adk:google-adk` 加 exclusions（保留 `google-genai`、`grpc-netty-shaded`），jar 280→145 MB；② adk-dev/sample/langchain4j 降 `test` scope，lombok 改 `provided`；③ 客户端侧见 `ai-ssh-client/AGENTS.md` 的打包说明。落地后跑纯 JVM 单测 + 启动装配 + 一次真机对话。
-- 打包坑：先停占用 `target/ai-ssh-server-app.jar` 的后端进程，否则 Maven 会产出残缺 jar 再报错。
-
-## v2 升级要点（安全 / 文件 / 审计 / 配置）
-
-```mermaid
-flowchart LR
-  T[trigger: HTTP/WS] --> D1[domain.ssh]
-  T --> D2[domain.filesystem]
-  T --> D3[domain.security]
-  T --> C[case: AI 回合]
-  C --> D4[domain.agent]
-  D1 --> I[infrastructure: JSch/MyBatis/AES]
-  D2 --> I
-  D3 --> I
-  D4 --> I
-```
-
-- **凭证加密**：`ICredentialCipher`（domain.security）→ `AesGcmCredentialCipher`（infrastructure），AES-256-GCM + `enc:v1:` 前缀；创建/更新时加密，连接前解密；历史明文值原样兼容。
-- **文件系统**：`IFileSystemService` + `RemotePathResolver` + `ISftpPort` → `JschSftpPort`；路径穿越/敏感目录/大小限额统一在领域服务拦截，所有写操作写审计。`rename` 同时承担移动：拒绝移动到自身/子目录、拒绝覆盖已存在目标，移动与重命名分别记 `FILE_MOVE` / `FILE_RENAME`。
-- **操作审计**：`IAuditService` → `AuditService` + `AuditLogRepository`；`AuditContext`（ThreadLocal）由 `AuditContextFilter` 注入 userId/clientIp。
-- **接口安全**：`SecurityProperties` + `ApiTokenFilter` + 全局 `CorsConfig`；WebSocket 握手与 HTTP 共用 CORS 白名单。
-- **智能体增强**：`chat-model.temperature/max-tokens/top-p` 真正下发；`agents[].read-only` 决定是否挂载 `writeRemoteFile`；配置回传增加工具清单、运行治理参数与配置告警。
-- **新增 AI 工具**：`listRemoteFiles` / `readRemoteFile` / `writeRemoteFile`，与 REST 文件系统复用同一领域服务。
-
-### 核心 API（新增）
-
-| 方法 | 端点 | 说明 |
-|---|---|---|
-| PUT | `/api/v1/ssh/connection/{id}` | 更新连接（部分更新，凭证留空保持） |
-| GET | `/api/v1/ssh/connection/groups?userId=` | 分组统计 |
-| GET | `/api/v1/sftp/{connectionId}/list` | 列目录 |
-| GET | `/api/v1/sftp/{connectionId}/stat` | 文件属性 |
-| GET | `/api/v1/sftp/{connectionId}/preview` | 文本预览（二进制识别） |
-| GET | `/api/v1/sftp/{connectionId}/download` | 下载（流式） |
-| POST | `/api/v1/sftp/{connectionId}/upload` | multipart 上传 |
-| POST | `/api/v1/sftp/{connectionId}/mkdir|rename|delete|write` | 写操作（`rename` 同时承担移动） |
-| GET | `/api/v1/audit/logs` | 审计分页（action/risk/connection 过滤） |
-| GET | `/api/v1/audit/actions` | 审计动作字典 |
-| GET | `/api/v1/system/overview` | 运行概览 |
-| GET | `/api/v1/system/health` | 健康检查（默认免鉴权） |
-| GET | `/api/v1/system/security` | 安全姿态（不含密钥） |
-
-### 数据库（v2 新增）
-
-- `ssh_connection` 新增：`group_name`、`tags`、`remark`、`favorite`、`last_connected_at`。
-- 新增 `operation_audit_log`：用户/连接/动作/资源/明细/风险/成功/耗时/客户端 IP。
-- 迁移脚本：`docs/dev-ops/mysql/sql/migration-v2.sql`；升级前 DDL 备份：`schema-backup-before-v2.sql`。
-
-### 安全配置
-
-```yaml
-ai:
-  security:
-    auth-enabled: false
-    credential-key: ${AI_SECURITY_CREDENTIAL_KEY:}
-    api-token: ${AI_SECURITY_API_TOKEN:}
-    sftp:
-      max-upload-bytes: 104857600
-      max-preview-bytes: 262144
-      blocked-paths: [/proc, /sys, /dev]
-    audit:
-      enabled: true
-```
-
-### 测试
+## 常用命令
 
 ```bash
+mvn -B -pl ai-ssh-server-app -am -DskipTests compile        # 编译
+mvn -B -pl ai-ssh-server-app -am -DskipTests package        # 打包（先停占用 jar 的后端进程）
+
+# 定向单测（纯 JVM，环境无关）
 mvn -pl ai-ssh-server-app -am \
-  "-Dtest=AesGcmCredentialCipherTest,RemotePathResolverTest,CommandGuardTest" \
+  "-Dtest=CommandGuardTest,CommandOutcomeAnalyzerTest,DispatchBudgetTest,AgentConfigValidatorTest,SubAgentResultExtractorTest,TerminalStateProviderTest,TaskStateMachineTest" \
   "-Dsurefire.failIfNoSpecifiedTests=false" test
 ```
 
-## 总结存放要求
+- 起服务：`java -jar ai-ssh-server-app/target/ai-ssh-server-app.jar --spring.profiles.active=local --server.port=8091`；验证用临时 `AI_SSH_HOME` + 空闲端口，避免污染真实数据。
+- 依赖真实 LLM Key / SSH 服务器的集成测试失败属正常；`SshSessionPortManualTest` 需 `AI_SSH_MANUAL_SSH=true` + 控制台输入。
 
-所有关于 ai-ssh-server 的学习总结、设计讨论、踩坑记录，统一存放在：
+## 配置与数据
 
-```
-D:\docs\knowledge\ai-ssh\
-```
+- `${AI_SSH_HOME}`（默认 `~/.ai-ssh`）：`data/`（H2）、`config/agent.yml` + `llm.yml`、`logs/`。
+- `agent.yml`：`chat-model`（provider/model/api-key…）、`tool-mcp-list`、`agents`（`sub-agents` / `delegate-mode` / `read-only` / `instruction`）、`runner.agent-name`；`llm.yml` 只是模型覆盖层，不重写 agent.yml。
+- 关键配置：`ai.ssh.exec.timeout-seconds=300`、`max-output-bytes=262144`、`ai.security.*`。
+- 环境变量：`AI_SSH_HOME`、`AI_SSH_PROFILE`（local/server）、`AI_SSH_DB_URL/USERNAME/PASSWORD`、`AI_SSH_LLM_API_KEY`、`AI_SECURITY_CREDENTIAL_KEY/API_TOKEN`、`AI_SSH_AUTH_ENABLED`、`SERVER_PORT`。
 
-以便集中查阅和管理。
+## 版本要点（细节见下方文档库）
 
-**书写总结时必须遵循** `D:\docs\AGENTS.md` 中的编写规则——一篇一主题、模板结构（问题背景→核心方案→关键代码→踩坑记录）、互相引用、善用 Mermaid 图表。
+- **v2**：凭证 AES-256-GCM、SFTP 文件系统与路径闸门、操作审计、接口令牌鉴权、`read-only` 工具边界。
+- **v3**：桌面 sidecar（jar + jlink JRE）、H2/MySQL 双模式、配置热重装。
+- **v3.2**：`delegate-mode`（hybrid 默认 / dispatch-only）、只读智能体命令级拦截、`SshCommandResult` 结构化执行（stderr/退出码/超时/输出上限）。
+- **v3.3**：派发预算、会话绑定自愈、配置前置校验、MCP 只读边界与回收、编排器健壮性、审计上下文传播、ReAct 可观测与可取消、悬挂工具步兜底、执行痕迹、`AppException` 带 message。
 
-## SSH 领域设计
+## 约定
 
-SSH 连接框架用于统一管理 SSH 连接的生命周期：创建配置、建立连接、断开连接、查询列表、软删除。
+- 命名：`XxxEntity` / `XxxVO`（domain）、`XxxPO`（infrastructure）、`IXxxDao`、`IXxxRepository`、`IXxxPort`、`IXxxApiService`。
+- 统一返回 `Response<T>`（code/info/data），错误码用 `ResponseCode`。
+- MySQL 8，MyBatis-Plus 逻辑删除字段 `deleted`（0/1）；SSH 用 JSch 0.1.55，端口 `ISshSessionPort`。
+- DDD 边界：domain 只定义端口/领域服务，不依赖 framework 实现。
 
-详细总结见 `D:\docs\knowledge\ai-ssh\`：
-- [SSH 库表设计取舍.md](D:\docs\knowledge\ai-ssh\SSH%20库表设计取舍.md) — 表拆分依据（访问频率×数据体积）、VO vs Entity 判定、MP 版本踩坑
-- [SSH 领域 DDD 分层落地.md](D:\docs\knowledge\ai-ssh\SSH%20领域%20DDD%20分层落地.md) — 聚合设计、仓库/端口接口隔离、调用链路、踩坑记录
-- [人机共用终端——统一会话层设计与实现.md](D:\docs\knowledge\ai-ssh\人机共用终端——统一会话层设计与实现.md) — WebSocket 和 AI 工具合并为一条终端通路，Marker 输出检测，写入锁
+## 打包体积（2026-10 实测；结论：300 MB 可接受，暂不优化）
 
-## AI Agent 踩坑记录
+- 组成：jar 280 MB（348 个 lib）+ jlink JRE 77.5 MB + exe 8.9 MB → NSIS 300 MB；安装包≈各部件之和。
+- 大头是 ADK 带入但未用的厂商/云集成（Vertex protos 37、gRPC 23、google-cloud 27、anthropic+kotlin 14.5、eclipse/arrow 16.7、docker+BouncyCastle 10.8、adk-dev 12 MB）；`openai-java` 50 MB 是 `spring-ai-openai` 真需求，`google-genai` 是 ADK 事件类型必需。
+- 以后要瘦身（已实测）：根 `pom.xml` 给 `google-adk` 加 exclusions（保留 `google-genai`、`grpc-netty-shaded`），jar 280→145 MB；adk-dev/sample/langchain4j 降 `test`，lombok 改 `provided`；客户端侧见 `ai-ssh-client/AGENTS.md`。
 
-详细总结见 `D:\docs\knowledge\ai-ssh\`：
-- [空参数函数调用问题排查与修复.md](D:\docs\knowledge\ai-ssh\空参数函数调用问题排查与修复.md) — 4 轮排查（来源确认→工具防御→架构改动→根因），最终定位 `FixedSpringAI` 中 `Map.toString()` 产生非法 JSON
-- [SSE 流式换行碎片问题排查与修复.md](D:\docs\knowledge\ai-ssh\SSE流式换行碎片问题排查与修复.md) — 5 轮排查（ADK→SpringAI→后端过滤→前端渲染→优化），Spring AI 流式 meta-event，前端 `norm()` 密度规整缓解
-- [终端方案对比——ChannelShell vs ChannelExec](D:\docs\knowledge\ai-ssh\终端方案对比——ChannelShell%20vs%20ChannelExec.md) — 三种方案演变（marker → 双缓冲+prompt → ChannelExec），教学项目参考
-- [ReAct Case 架构设计与实现](D:\docs\knowledge\ai-ssh\ReAct%20Case%20架构设计与实现.md) — 教学项目 2-3 节落地：节点链路编排、DynamicContext、外部循环 vs ADK 内部循环、5 个 bug 从发现到修复
-- [动态 Prompt 上下文增强——AI 装上眼睛与记性](D:\docs\knowledge\ai-ssh\动态%20Prompt%20上下文增强——AI%20装上眼睛与记性.md) — 教学项目 2-4 节落地：环境采集 + 里程碑追踪 + 最近命令记忆 + 危险命令拦截
-- [显式 ReAct 编排——循环控制权回归应用层](D:\docs\knowledge\ai-ssh\显式%20ReAct%20编排——循环控制权回归应用层.md) — 架空 ADK 内部循环：FixedSpringAI 单轮模式（工具调用转 `<tool_calls>` 标签）、每轮富化落地、多命令结果累积回灌、5 个 bug 修复
-- [ReAct 上下文治理与历史净化——教程 2-5 和 2-6 吸收落地](D:\docs\knowledge\ai-ssh\ReAct%20上下文治理与历史净化——教程%202-5%20和%202-6%20吸收落地.md) — 吸收教程 2-5/2-6：ContextProvider 体系（任务锚点 + 工具摘要）、HybridReducer 历史裁剪三件套、CustomAdkSessionService 框架层净化 + 限流、四道闸门分工
-- [意图识别——规则与LLM级联+反馈回路（教程 2-7 吸收落地）](D:\docs\knowledge\ai-ssh\意图识别——规则与LLM级联+反馈回路（教程%202-7%20吸收落地）.md) — 吸收教程 2-7：规则→LLM 级联置信度漏斗、反馈回路重分类、ContextTracker/LRU 缓存、显式循环适配（第 1 轮识别、ToolCallNode 反馈、修正提示一次性注入）、spring-ai 2.x 适配
-- [任务步进状态机——托管循环回合收口落地](D:\docs\knowledge\ai-ssh\任务步进状态机——托管循环回合收口落地.md) — V3.2：TaskStateVO 三入口写路径（AiCallNode 分类后 sync / ToolCallNode 每工具打点 / LoopDecisionNode 回合收口）、completed 判据收敛到回合收口（教学版"首次成功即完成"在托管循环下是 bug）、CONTINUE 会话意图回填、任务态暂存内存缓存
-- [前端配置信息真实化——后端配置文件只读回传与 UI 对齐](D:\docs\knowledge\ai-ssh\前端配置信息真实化——后端配置文件只读回传与%20UI%20对齐.md) — query_ai_agent_config_list 回传配置文件真实信息（chatModel 含 context-size、subAgents、工作流、MCP 工具归一、skills、plugins，剔除 apiKey）；客户端状态指示灯替换连接开关、输入栏假模型占位清理、AI 配置侧栏只读展示
-- [会话冷启动一致性完善——历史回顾注入与任务态落库](D:\docs\knowledge\ai-ssh\会话冷启动一致性完善——历史回顾注入与任务态落库.md) — 重启后模型失忆与任务态清零的修复：P0 历史回顾（SessionHistoryReplayer 以 user 事件注入重建的空 ADK 会话，尾部窗口预算）、P1 任务态落库（chat_task_state + IntentService 旁路持久化 + RootNode 冷启动恢复）；含挂起事项（长期记忆提取质量）
-- [长期记忆与对话持久化——教程 2-8 吸收落地](D:\docs\knowledge\ai-ssh\长期记忆与对话持久化——教程%202-8%20吸收落地.md) — 吸收教程 2-8：4 张表（chat_session/chat_message/chat_milestone/long_term_memory）、消息流经时规则提取 4 类记忆、UNIQUE 键去重 + hit_count、粗筛精排召回、节点挂钩旁路写入、冷启动恢复与会话连续性、顺带修复 3 个 bug（工具摘要注入缺席/回灌累积上限/会话连续性）
-- [上下文策略的代际演进与场景适配——设计讨论复盘](D:\docs\knowledge\ai-ssh\上下文策略的代际演进与场景适配——设计讨论复盘.md) — 2-8 前后设计讨论沉淀：记忆价值=重观察代价、轨迹 vs 里程碑分工、正则长尾实测（Redis 正则与 9 种版本输出）、order=25 隐性契约、每轮裁剪 vs 阈值压缩、SaaS vs 本地 Agent 保守分层；附项目待优化清单
-- [缓存命中与推理强度——教程 2-9 吸收落地](D:\docs\knowledge\ai-ssh\缓存命中与推理强度——教程%202-9%20吸收落地.md) — 吸收教程 2-9：reasoning-effort 配置链路、streamUsage + usage/缓存命中观测（spring-ai 2.0.0 适配）、动态上下文前缀→后缀全套翻转（净化落库字节不变论证）、会话治理参数化、工具输出 head/tail 保留
-- [子Agent派发——教程 2-10 吸收落地](D:\docs\knowledge\ai-ssh\子Agent派发——教程%202-10%20吸收落地.md) — 吸收教程 2-10：配置驱动父子装配（`sub-agents` + AgentNode 二段式，父智能体不再持有 executeCommand）、三级派发一条底座（点名派发 / `dispatchSubAgents` / `planAndDispatchSubAgents` → PlanParser/PlanValidator → DAG 编排器 → 执行器）、独立会话隔离 + **终端会话经子会话初始 state 透传**（弃教程的 ThreadLocal）、结果收敛器、子会话回收；含九项对教程缺陷的修正与两个冒烟挖出的真 bug（工具结果事件 role=user 被当用户消息重建成纯文本 → tool 配对断裂 400；ADK App 名标识符校验拒绝连字符）
-- [厂商适配收敛——ADK 适配器零厂商与模型通道档案](D:\docs\knowledge\ai-ssh\厂商适配收敛——ADK%20适配器零厂商与模型通道档案.md) — 从"删掉 DeepSeek 依赖"到"接受渠道差异"：厂商知识只留在唯一 provider 档案里（`ChatModelFactory` / `ProviderProfile` / `ProviderCapabilities` 能力注册表 / `impl/{DeepSeekNative,OpenAiCompatible}Profile`），ADK 适配器更名 `SpringAiLlmAdapter` 并拆成"接线 + 请求组装 + 响应聚合 + 草稿协议 + usage 观测 + 排障"六件；`chat-model.provider` 选通道，能力声明同时喂装配日志/装配期告警/配置回传 DTO/前端只读展示；解释 Spring AI 的 options 多态裂缝（两家同样强转、非空 options 不合并默认值）与协议通道的流式思考草稿缺口（裸 curl 实证）；同批次另拆会话治理（`SessionStore`/`EventGovernor`/`CompactionSupport` + `SessionGovernanceProperties` 收口 14 处 `@Value`）与 SSH 工具（`SshSessionBindings`/`CommandGuard`/`CommandOutcomeAnalyzer`）
-- [子智能体运行轨迹——SSE 步骤协议 v2 与前端对接](D:\docs\knowledge\ai-ssh\子智能体运行轨迹——SSE%20步骤协议%20v2%20与前端对接.md) — 把平铺步骤流升级为带 `id/p/k/st/ms/att/ag` 的协议 v2：子智能体的命令与输出经**跨层步骤出口**（`ReActStepSink`，与 `SshSessionBindings` 同形，按会话 ID 键、与线程解耦）嵌套上报，前端按 id 幂等 upsert 渲染成运行轨迹树（派发卡片 → 任务 → 命令）；顺带修掉"停止不生效/错误不可见/快捷提示假发送/重新生成只删除/清空不解绑会话"等交互 bug，并把 `usage`（token + 缓存命中）与 `done.sr` 下发到界面
-- [托管循环回归与上下文预算化压缩——架构反思落地](D:\docs\knowledge\ai-ssh\托管循环回归与上下文预算化压缩——架构反思落地.md) — 撤销显式 ReAct 循环（V3）：ADK Runner 内部循环回归（FixedSpringAI partial/聚合语义、聚合事件一条一落库）、案例层按教学项目恢复**节点链路**（Root→AiCall→ToolCall→LoopDecision→UserFeedback 回合流水线，无循环回跳；AiCall 事件中继、ToolCall 回合后置工具治理、UserFeedback 收口落库）、上下文长度管理升级落在 ADK 1.9 原生事件压缩（EventsCompactionConfig + 确定性摘要器 P4.1）、回归驱动修复三连（tool 消息配对 400 / text must not be null / 聚合去重 / part 结构化截断）
-- [上下文长度管理升级——预算化、工具输出治理与 compact 引擎设计稿](D:\docs\knowledge\ai-ssh\上下文长度管理升级——预算化、工具输出治理与%20compact%20引擎设计稿.md) — 主流 compact 对照（dsh 本机源码实证：thresholdRatio 0.8/retainRatio 0.16/checkpoint/tool-pairing）、W2 参数化与 W3 head/tail 已落地、W4 compact 引擎设计稿（预算触发、折叠回填、切割点平衡、写回机制）——已按 ADK 原生事件压缩落地（P4.1）
-- 相关架构改动：删除手动历史嵌入、人机终端面板显示最终去掉、显式 ReAct "每轮循环跳转"语义删除（V3 托管循环回归，代码见 git 历史与《托管循环回归与上下文预算化压缩》）；案例层以教学式节点链路（回合流水线）重建（V3.1）
+## 文档库
 
-### 核心 API
-
-| 方法 | 端点 | 说明 |
-|---|---|---|
-| POST | `/api/v1/ssh/connection/create` | 创建连接配置 |
-| POST | `/api/v1/ssh/connection/{id}/connect` | 建立连接 |
-| POST | `/api/v1/ssh/connection/{id}/disconnect` | 断开连接 |
-| GET | `/api/v1/ssh/connection/list?userId=` | 查询连接列表 |
-| GET | `/api/v1/ssh/connection/{id}` | 查询连接详情 |
-| DELETE | `/api/v1/ssh/connection/{id}` | 删除连接 |
-
-### 领域模型
-
-```
-SshConnectionAggregate
-  ├── SshConnectionEntity        ← 基础连接信息 + 凭证 + 状态
-  └── SshConnectionConfigEntity  ← 高级配置（独立表）
-```
-
-### 项目约定
-
-- 实体后缀：`XxxEntity`（domain 层）
-- 值对象后缀：`XxxVO`（domain 层）
-- 持久化对象后缀：`XxxPO`（infrastructure 层，MP 注解）
-- DAO 接口后缀：`IXxxDao`，继承 `BaseMapper<XxxPO>`
-- 仓库接口：领域层定义（`IXxxRepository`），基础设施层实现
-- 端口接口：领域层定义（`IXxxPort`），基础设施层实现
-- API 接口：api 模块定义（`IXxxApiService`），trigger 模块实现
-- 所有接口统一返回 `Response<T>`（code / info / data）
-- 错误码使用 `ResponseCode` 枚举
-
-### 数据库
-
-```
-MySQL 8.0 — 192.0.2.10:13306 / ai_ssh
-MyBatis-Plus 逻辑删除字段: deleted (0-未删, 1-已删)
-```
-
-### SSH 客户端
-
-- 库：JSch 0.1.55
-- 端口：`ISshSessionPort`（domain 层）→ `SshSessionPort`（infrastructure 层）
-- 连接管理：`ConcurrentHashMap<String, Session>` 会话池
+- 学习总结 / 设计讨论 / 踩坑：`D:\docs\knowledge\ai-ssh\`，遵循 `D:\docs\AGENTS.md`（一篇一主题、问题背景→核心方案→关键代码→踩坑、互相引用、Mermaid）。
+- v3.1–v3.3 执行记录：`D:\docs\projects\ai-ssh\`（`type: facts`，含 `verified_at`）。
+- 已有主题：SSH 库表/DDD 分层/人机共用终端、ReAct Case 架构、动态上下文增强、上下文治理与压缩、意图识别、任务步进状态机、长期记忆、缓存与推理强度、子 Agent 派发、厂商适配、SSE 步骤协议 v2、托管循环回归、空参数函数调用、SSE 换行碎片、终端方案对比。
